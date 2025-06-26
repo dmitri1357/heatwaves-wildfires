@@ -475,7 +475,7 @@ vals = results25['Warm Season (May-Oct)'].values
 names = ecoregions.US_L3NAME
 blah = pd.DataFrame({'eco':names,'val':vals})
 
-# Fig. 5d - dry HW ratios
+# Fig. 5d - moist HW ratios
 
 # plot >75th percentile heatwaves 
 
