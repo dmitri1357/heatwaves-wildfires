@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+
+# % of BA associated with heatwaves and 5 days after heatwaves
+
+import xarray as xr
+import geopandas as gpd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import linregress
+import matplotlib.patches as mpatches
+from matplotlib.colors import ListedColormap, Normalize
+
+# Load datasets
+wus = xr.open_dataset('wus_ecoregion_data.nc')
+states = gpd.read_file('cb_2018_us_state_5m.shp')
+states = states.to_crs("EPSG:4326")
+states = states[states.NAME.isin(['Washington', 'Oregon', 'Idaho', 'Montana',
+                                  'California', 'Nevada', 'Utah', 'Wyoming',
+                                  'Colorado', 'Arizona', 'New Mexico'])]
+wus_ecoregions = gpd.read_file("wus_ecoregions.shp")
+
+# Get unique ecoregion identifiers
+ecoregion_ids = wus.ecoregion.values
+years = np.arange(2001, 2025)
+
+# Initialize dictionaries to store results
+percent_burned_results = {}
+total_burned_results = {}
+total_heatwave_days_results = {}
+trend_results = {}
+
+# store WUS-aggregate numbers for map insets
+total_burned_hw = 0
+total_burned_after = 0
+total_burned_before = 0
+total_burned_after7 = 0
+total_burned_hw_and_after = 0
+total_burned_total = 0
+
+# store aggregates for forest
+total_burned_hw_1 = 0
+total_burned_after_1 = 0
+total_burned_before_1 = 0
+total_burned_after_1_7 = 0
+total_burned_hw_and_after_1 = 0
+total_burned_total_1 = 0
+
+# store aggregates for non-forest
+total_burned_hw_0 = 0
+total_burned_after_0 = 0
+total_burned_before_0 = 0
+total_burned_after_0_7 = 0
+total_burned_hw_and_after_0 = 0
+total_burned_total_0 = 0
+
+forest_boolean_vector = np.array([1,1,1,1,1,1,0,1,1,0,1,0,0,0,1,1,1,0,1,0,1,0,1,1,1,1,1,0,0,1])
+
+# Process each ecoregion
+for idx, ecoregion in enumerate(ecoregion_ids):
+    forest_id = forest_boolean_vector[idx]
+    
+    ecoregion_burned_area = wus.burned_area.sel(ecoregion=ecoregion)
+    ecoregion_tmax_percentile = wus.tmax_percentile.sel(ecoregion=ecoregion)
+
+    # Initialize lists to store yearly masks
+    annual_heatwave_masks = []
+    annual_days_after_masks = []
+    annual_days_before_masks = []
+    annual_days_after_masks7 = []
+    
+    burned_on_heatwave_days_list = []
+    burned_after_heatwave_days_list = []
+    burned_before_heatwave_days_list = []
+    burned_after_heatwave_days_list7 = []
+    total_burned_area_list = []
+    total_heatwave_days_list = []
+
+    # **Split the data into 24 separate years before processing**
+    for year in years:
+        # Select data for the current year
+        year_burned_area = ecoregion_burned_area.sel(day=ecoregion_burned_area.day.dt.year == year)
+        year_tmax_percentile = ecoregion_tmax_percentile.sel(day=ecoregion_tmax_percentile.day.dt.year == year)
+
+        # **Identify heatwave days (3+ consecutive days with tmax_percentile > 90)**
+        rolling_sum = (year_tmax_percentile > 90).rolling(day=3, center=False).sum()
+        heatwave_days = rolling_sum >= 3
+
+        # **Expand the heatwave mask to include all days within the heatwave period**
+        expanded_heatwave_mask = heatwave_days.copy()
+        for i in range(1, 3):  # Include up to 2 days before heatwave starts
+            expanded_heatwave_mask |= heatwave_days.shift(day=-i, fill_value=False)
+            
+        # Identify the 5 days **before** a heatwave starts (ensuring no overlap with previous heatwaves)
+        pre_heatwave_mask = xr.full_like(expanded_heatwave_mask, False, dtype=bool)
+
+        for i in range(1, 6):  # Look back 5 days
+            pre_heatwave_day = expanded_heatwave_mask.shift(day=-i, fill_value=False)  # Shift backward
+            pre_heatwave_mask |= pre_heatwave_day  # Combine across all 3 days
+         
+        # Ensure that no pre-heatwave days overlap with earlier heatwaves
+        pre_heatwave_mask &= ~expanded_heatwave_mask
+        
+        # Identify the 5 days **after** a heatwave ends (ensuring no overlap with following heatwaves)
+        days_after = xr.full_like(expanded_heatwave_mask, False, dtype=bool)
+
+        for i in range(1, 6):  # Look forward 5 days
+            post_heatwave_day = expanded_heatwave_mask.shift(day=i, fill_value=False)  # Shift forward
+            days_after |= post_heatwave_day  # Combine across all 5 days
+         
+        # Ensure that no post-heatwave days overlap with following heatwaves
+        days_after &= ~expanded_heatwave_mask
+
+        # Identify the 6-10 days **after** a heatwave ends (ensuring no overlap with following heatwaves)
+        days_after7 = xr.full_like(expanded_heatwave_mask, False, dtype=bool)
+
+        for i in range(6, 11):  # Look forward 6-10 days
+            post_heatwave_day = expanded_heatwave_mask.shift(day=i, fill_value=False)  # Shift forward
+            days_after7 |= post_heatwave_day  # Combine across all 5 days
+         
+        # Ensure that no post-heatwave days overlap with following heatwaves
+        days_after7 &= ~expanded_heatwave_mask
+
+        # **Store the masks for yearly concatenation**
+        annual_heatwave_masks.append(expanded_heatwave_mask)
+        annual_days_after_masks.append(days_after)
+        annual_days_before_masks.append(pre_heatwave_mask)
+        annual_days_after_masks7.append(days_after7)
+
+        # **Compute burned area for heatwave days and post-heatwave days**
+        burned_on_heatwave_days = year_burned_area.where(expanded_heatwave_mask).sum(dim="day").item()
+        burned_after_heatwave_days = year_burned_area.where(days_after).sum(dim="day").item()
+        burned_before_heatwave_days = year_burned_area.where(pre_heatwave_mask).sum(dim="day").item()
+        burned_after_heatwave_days7 = year_burned_area.where(days_after7).sum(dim="day").item()
+        total_burned_area = year_burned_area.sum(dim="day").item()
+        total_heatwave_days = expanded_heatwave_mask.sum(dim="day").item()
+
+        # Store yearly results
+        burned_on_heatwave_days_list.append(burned_on_heatwave_days)
+        burned_after_heatwave_days_list.append(burned_after_heatwave_days)
+        burned_before_heatwave_days_list.append(burned_before_heatwave_days)
+        burned_after_heatwave_days_list7.append(burned_after_heatwave_days7)
+        total_burned_area_list.append(total_burned_area)
+        total_heatwave_days_list.append(total_heatwave_days)
+
+    # **Concatenate the yearly masks into a single 24-year time series**
+    full_heatwave_mask = xr.concat(annual_heatwave_masks, dim="day")
+    full_days_after_mask = xr.concat(annual_days_after_masks, dim="day")
+    full_days_before_mask = xr.concat(annual_days_before_masks, dim="day")
+    full_days_after_mask7 = xr.concat(annual_days_after_masks7, dim="day")
+
+    # **Convert stored lists into numpy arrays**
+    burned_on_heatwave_days = np.array(burned_on_heatwave_days_list)
+    burned_after_heatwave_days = np.array(burned_after_heatwave_days_list)
+    burned_before_heatwave_days = np.array(burned_before_heatwave_days_list)
+    burned_after_heatwave_days7 = np.array(burned_after_heatwave_days_list7)
+    total_burned_area = np.array(total_burned_area_list)
+    total_heatwave_days = np.array(total_heatwave_days_list)
+
+    # **Compute annual percentages**
+    percent_burned_on_heatwave_days = np.where(total_burned_area > 0,
+                                               (burned_on_heatwave_days / total_burned_area) * 100, 0)
+    
+    percent_burned_after_heatwave_days = np.where(total_burned_area > 0,
+                                                  (burned_after_heatwave_days / total_burned_area) * 100, 0)
+    
+    percent_burned_before_heatwave_days = np.where(total_burned_area > 0,
+                                                  (burned_before_heatwave_days / total_burned_area) * 100, 0)
+    
+    percent_burned_after_heatwave_days7 = np.where(total_burned_area > 0,
+                                                  (burned_after_heatwave_days7 / total_burned_area) * 100, 0)
+    
+    percent_burned_on_and_after_heatwave_days = np.where(total_burned_area > 0,
+                                                         ((burned_on_heatwave_days + burned_after_heatwave_days) / total_burned_area) * 100, 0)
+
+    # **Compute the 24-year aggregated percentage**
+    burned_on_heatwave_days_total = np.sum(burned_on_heatwave_days)
+    burned_after_heatwave_days_total = np.sum(burned_after_heatwave_days)
+    burned_before_heatwave_days_total = np.sum(burned_before_heatwave_days)
+    burned_after_heatwave_days_total7 = np.sum(burned_after_heatwave_days7)
+    total_burned_area_total = np.sum(total_burned_area)
+    
+    percent_burned_on_heatwave_days_total = (burned_on_heatwave_days_total / total_burned_area_total) * 100 if total_burned_area_total > 0 else 0
+    percent_burned_after_heatwave_days_total = (burned_after_heatwave_days_total / total_burned_area_total) * 100 if total_burned_area_total > 0 else 0
+    percent_burned_before_heatwave_days_total = (burned_before_heatwave_days_total / total_burned_area_total) * 100 if total_burned_area_total > 0 else 0
+    percent_burned_after_heatwave_days_total7 = (burned_after_heatwave_days_total7 / total_burned_area_total) * 100 if total_burned_area_total > 0 else 0
+    percent_burned_on_and_after_heatwave_days_total = ((burned_on_heatwave_days_total + burned_after_heatwave_days_total) / total_burned_area_total) * 100 if total_burned_area_total > 0 else 0
+
+    # **Store results**
+    percent_burned_results[ecoregion] = {
+        "annual": percent_burned_on_heatwave_days,
+        "overall": percent_burned_on_heatwave_days_total,
+        "annual_after": percent_burned_after_heatwave_days,
+        "overall_after": percent_burned_after_heatwave_days_total,
+        "overall_before": percent_burned_before_heatwave_days_total,
+        "overall_after7": percent_burned_after_heatwave_days_total7,
+        "annual_combined": percent_burned_on_and_after_heatwave_days,
+        "overall_combined": percent_burned_on_and_after_heatwave_days_total
+    }
+
+    total_burned_results[ecoregion] = total_burned_area
+    total_heatwave_days_results[ecoregion] = total_heatwave_days
+
+    # store aggregate results (incrementally add each ecoregion)
+    total_burned_hw += burned_on_heatwave_days_total
+    total_burned_after += burned_after_heatwave_days_total
+    total_burned_before += burned_before_heatwave_days_total
+    total_burned_after7 += burned_after_heatwave_days_total7
+    total_burned_hw_and_after += (burned_on_heatwave_days_total + burned_after_heatwave_days_total)
+    total_burned_total += total_burned_area_total
+    
+    # store aggregate forest results (incrementally add each forest ecoregion)
+    if forest_id == 1:
+        total_burned_hw_1 += burned_on_heatwave_days_total
+        total_burned_after_1 += burned_after_heatwave_days_total
+        total_burned_before_1 += burned_before_heatwave_days_total
+        total_burned_after_1_7 += burned_after_heatwave_days_total7
+        total_burned_hw_and_after_1 += (burned_on_heatwave_days_total + burned_after_heatwave_days_total)
+        total_burned_total_1 += total_burned_area_total
+        
+    # store aggregate non-forest results (incrementally add each non-forest ecoregion)
+    if forest_id == 0:
+        total_burned_hw_0 += burned_on_heatwave_days_total
+        total_burned_after_0 += burned_after_heatwave_days_total
+        total_burned_before_0 += burned_before_heatwave_days_total
+        total_burned_after_0_7 += burned_after_heatwave_days_total7
+        total_burned_hw_and_after_0 += (burned_on_heatwave_days_total + burned_after_heatwave_days_total)
+        total_burned_total_0 += total_burned_area_total
+
+    # Compute linear trends
+    # didn't update this after adding the 4-7 days lags post-HW
+    trend_hw_days, _, _, p_hw_days, _ = linregress(years, total_heatwave_days)
+    trend_ba, _, _, p_ba, _ = linregress(years, total_burned_area)
+    trend_percent, _, _, p_percent, _ = linregress(years, percent_burned_on_heatwave_days)
+    trend_percent_after, _, _, p_percent_after, _ = linregress(years, percent_burned_after_heatwave_days)
+    trend_percent_on_and_after, _, _, p_percent_combined, _ = linregress(years, percent_burned_on_and_after_heatwave_days)
+
+    trend_results[ecoregion] = {
+        "burned_area_trend": (trend_ba, p_ba),
+        "heatwave_days_trend": (trend_hw_days, p_hw_days),
+        "percent_burned_trend": (trend_percent, p_percent),
+        "percent_burned_trend_after": (trend_percent_after, p_percent_after),
+        "percent_burned_trend_combined": (trend_percent_on_and_after, p_percent_combined)
+    }
+
+# get BA percentages for insets 
+wus_hwd_ba_perc = total_burned_hw/total_burned_total
+wus_hwd_ba_perc_1 = total_burned_hw_1/total_burned_total_1
+wus_hwd_ba_perc_0 = total_burned_hw_0/total_burned_total_0
+wus_hwd_ba_perc_after = total_burned_after/total_burned_total
+wus_hwd_ba_perc_after_1 = total_burned_after_1/total_burned_total_1
+wus_hwd_ba_perc_after_0 = total_burned_after_0/total_burned_total_0
+
+wus_hwd_ba_perc + wus_hwd_ba_perc_after # 42.3 %
+wus_hwd_ba_perc_1 + wus_hwd_ba_perc_after_1 # 41.0%
+wus_hwd_ba_perc_0 + wus_hwd_ba_perc_after_0 # 44.5 %
+
+# Plot Western U.S. Map 
+fig, ax = plt.subplots(figsize=(8, 6))
+
+# Extract the 24-year overall percentage
+wus_ecoregions['percent_burned_hw'] = [percent_burned_results[eco]["overall_combined"] for eco in ecoregion_ids]
+
+vmin, vmax = 0, 70
+
+# extract the combined % from all ecoregions
+values = {ecoregion: data["overall_combined"] for ecoregion, data in percent_burned_results.items()}
+
+# Define colormap
+cmap = plt.cm.get_cmap("YlOrRd", 14)  
+vmin, vmax = 0, 70  
+norm = Normalize(vmin=vmin, vmax=vmax)
+
+wus_ecoregions.plot(column='percent_burned_hw', vmin=vmin, vmax=vmax, ax=ax, cmap=cmap, legend=False)
+
+# plot state & ecoregion boundaries
+states.boundary.plot(ax=ax, edgecolor='k', lw=1)
+wus_ecoregions.boundary.plot(ax=ax, edgecolor="black", linewidth=0.5)
+
+ax.set_title("% of Burned Area on and after Heatwave Days (2001-2024)")
+ax.set_axis_off()
+
+# Horizontal colorbar only
+cbar_ax = fig.add_axes([0.15, 0.08, 0.7, 0.02])
+cbar = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), cax=cbar_ax, orientation='horizontal')
+cbar.ax.tick_params(labelsize=15)
+plt.show()
