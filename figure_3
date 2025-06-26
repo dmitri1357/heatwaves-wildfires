@@ -3,6 +3,7 @@
 '''
 Note - this code shows how the BA ratios were calculated during heatwaves (panel A) and post-HW (panel D).
 The code to calculate ratios for NFIRE human and natural is the same with only the variable names swapped, and is not shown here.
+Similarly, the line plot of BA ratios is only shown for panel G.
 '''
 
 # Fig 3a - BA ratios during HW
@@ -516,3 +517,70 @@ cbar = fig.colorbar(
 
 #plt.suptitle("BA ratio during heatwaves vs. non-heatwave days")
 plt.show()
+
+# Fig. 3G
+
+# new version with broken y-axis
+
+import matplotlib.pyplot as plt
+
+forest_boolean_vector = np.array([1,1,1,1,1,1,0,1,1,0,1,0,0,0,1,1,1,0,1,0,1,0,1,1,1,1,1,0,0,1])
+
+# break out burned area ratios by forest/non-forest
+forest_ba_ratios = burned_area_ratios[forest_boolean_vector==1,:]
+nonforest_ba_ratios = burned_area_ratios[forest_boolean_vector==0,:]
+forest_ba_mean = np.mean(forest_ba_ratios,axis=0)
+nonforest_ba_mean = np.mean(nonforest_ba_ratios,axis=0)
+
+fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(8, 6.8),
+                               gridspec_kw={'height_ratios': [1, 3]})
+
+lags = np.arange(-5, 15)  # X-axis from -7 to +7 (changed to -3 to +11)
+
+# Plot data in both axes
+for i in range(len(ecoregion_ids)):
+    color = "#228B22" if forest_boolean_vector[i] == 1 else "#964B00"
+    ax1.plot(lags, burned_area_ratios[i, :], '-', lw=1, alpha=0.7, color=color)
+    ax2.plot(lags, burned_area_ratios[i, :], '-', lw=1, alpha=0.7, color=color)
+
+ax1.plot(lags, forest_ba_mean, '-', lw=5, alpha=1, color="#228B22")
+ax1.plot(lags, nonforest_ba_mean, '-', lw=5, alpha=1, color="#964B00")
+ax2.plot(lags, forest_ba_mean, '-', lw=5, alpha=1, color="#228B22")
+ax2.plot(lags, nonforest_ba_mean, '-', lw=5, alpha=1, color="#964B00")
+
+# Set y-limits
+ax1.set_ylim(12, 21)
+ax2.set_ylim(-0.5, 10)
+
+# Remove spines between subplots
+ax1.spines['bottom'].set_visible(False)
+ax2.spines['top'].set_visible(False)
+
+# Hide unnecessary ticks
+ax1.tick_params(labelbottom=False)
+ax2.tick_params(labeltop=False)
+
+# Set specific y-ticks
+ax1.set_yticks([15, 20])
+ax1.tick_params(axis='y', labelsize=22)
+ax2.set_yticks(range(0, 11, 2))
+ax2.tick_params(axis='y', labelsize=22)
+
+# # Set x-ticks
+# plt.xticks(np.arange(-5, 15, 2), fontsize=22)
+
+custom_ticks = np.arange(-5, 15, 1)
+custom_labels = ['-5','','-3','','-1','1','','3','','5','','7','','9','','11','','13','','15']
+plt.xticks(custom_ticks, custom_labels, fontsize=22)
+
+# Add dashes to both axes
+for ax in (ax1, ax2):
+    ax.axvline(x=0, color='k', linestyle='--')
+    ax.axvline(x=4.5, color='k', linestyle='--')
+    ax.axvline(x=4 + 5, color='k', linestyle='--')
+    ax.axhline(y=1, color='k', linestyle='-')
+
+# Axis labels
+ax2.set_xlabel("Days relative to HW", fontsize=20)
+#ax2.set_ylabel("Ratio", fontsize=20)
+
