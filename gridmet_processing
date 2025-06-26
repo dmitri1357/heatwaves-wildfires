@@ -75,23 +75,5 @@ result.to_netcdf('tmax_ecoregions.nc')
 tmax_ecoregions = xr.open_dataset('tmax_ecoregions.nc') 
 percs = tmax_ecoregions.rank(dim="day", pct=True)
 percs = percs * 100
+
 percs.to_netcdf('tmax_ecoregions_perc.nc')
-
-# plot time series by ecoregion
-var = tmax_ecoregions.air_temperature.values
-
-ecoregion_names = ['Coast Range','Puget Lowland','Willamette Valley','Cascades','Sierra Nevada',
-                   'C. CA Foothills and Coast Mtns','C. CA Valley','S. CA Mtns.','E. Cascades Slopes','Columbia Plateau',
-                   'Blue Mtns.','Snake River Plain','C. Basin & Range','Mojave Basin & Range','N. Rockies',
-                   'ID Batholith','Middle Rockies','WY Basin','Wasatch/Uinta Mtns.','CO Plateaus',
-                   'S. Rockies','AZ/NM Plateau','AZ/NM Mountains','Canadian Rockies','N. Cascades',
-                   'Klamath Mtns./CA N. Coast Range','Madrean Archipelago','N. Basin & Range',
-                   'Sonoran Basin & Range','S. CA Coast']
-
-fig = plt.figure(figsize=(12,12))
-for k in range(30):
-    fig.add_subplot(6,5,k+1)
-    plt.plot(var[k,:],'-', color='tab:blue') 
-    #plt.ylabel('Fraction of JJAS CG lightning days', fontsize = 15)
-    plt.title(f'{ecoregion_names[k]}', size=8)
-fig.subplots_adjust(hspace=0.7,wspace=0.3)
