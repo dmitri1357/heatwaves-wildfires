@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+
+import xarray as xr
+import pandas as pd
+import numpy as np
+
+ds = xr.open_dataset('MODIS_ba_gridMET_2001.nc',decode_times=False)
+
+# all 22 annual MODIS burned fraction files in this directory
+import os
+
+all_files = os.listdir()
+files = []
+for file in all_files:
+    if file.endswith('.nc'):
+        files.append(file)
+
+files.sort()
+
+# ingest and combine all 22 annual files
+ds = xr.open_mfdataset(files, concat_dim='time', decode_times=False, combine='nested')
+
+# Flip the 'lat' dimension upside down
+ds_flipped = ds.isel(lat=slice(None, None, -1))
+
+dates = pd.date_range(start='1/1/2001', end='12/31/2022')
+dates = dates[~((dates.month == 2) & (dates.day == 29))]
+
+ds_flipped = ds_flipped.assign_coords(time=dates)
+baf_all = ds_flipped.drop_vars(['days'])
+
+baf = baf_all.burnf.values
+
+## calculate areas of grid cells in sqkm by cosine normalization of latitudes
+
+lats = baf_all.lat.values
+lons = baf_all.lon.values
+lat_diff = lats[1] - lats[0]
+lon_diff = lons[1] - lons[0]
+lats = np.append(lats,lats[-1]+lat_diff)
+lons = np.append(lons,lons[-1]+lon_diff)
+
+lat_dist = np.abs(lat_diff * 111) # km for one degree of latitude in the mid-latitudes
+
+areas = np.empty([431,534])
+for i in range(431): # 431 latitude bands 
+    lat1 = lats[i] # grab current latitude
+    for j in range(534): # 534 longitude bands
+        lon1 = lons[j] # left edge
+        lon2 = lons[j+1] # right edge
+        cosrad = np.cos(np.deg2rad(lat1)) 
+        deg1 = cosrad * 111.32 # 111.32 km for one degree of longitude at equator
+        lon_dist = deg1 * lon_diff
+        areas[i,j] = lat_dist * lon_dist
+
+ba = baf * areas
+
+dates = pd.date_range(start='1/1/2001', end='12/31/2022')
+dates = dates[~((dates.month == 2) & (dates.day == 29))]
+dates = pd.DataFrame(dates)
+lats = baf_all.lat.values
+lons = baf_all.lon.values
+
+ba_ds = xr.DataArray(ba.astype('float32'), name='ba', coords={'time':dates.iloc[:,0],
+                   'lat':lats,
+                   'lon':lons})
+
+ba_ds.to_netcdf('gridcell_ba_all.nc')
