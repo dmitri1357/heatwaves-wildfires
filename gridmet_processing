@@ -6,7 +6,7 @@ import xarray as xr
 import geopandas as gpd
 import matplotlib.pyplot as plt 
 
-# all 24 annual files 
+# all 24 annual files of gridMET Tmax (2001-2024)
 import os
 
 all_files = os.listdir()
