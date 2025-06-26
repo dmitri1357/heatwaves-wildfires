@@ -647,7 +647,7 @@ rhmin_ecoregions = np.empty([30,24])
 
 # Process each ecoregion and accumulate the results
 for ecoregion_idx, ecoregion in tqdm(enumerate(ecoregion_ids), total=len(ecoregion_ids)):
-    ecoregion_burned_area = wus.minimum_rh.sel(ecoregion=ecoregion) # flipped to ERC from BA
+    ecoregion_burned_area = wus.minimum_rh.sel(ecoregion=ecoregion) # flipped to RHmin from BA
     ecoregion_tmax_percentile = wus.tmax_percentile.sel(ecoregion=ecoregion)
 
     # Initialize lists to store yearly masks and burned area data
