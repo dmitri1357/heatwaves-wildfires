@@ -6,7 +6,7 @@ import xarray as xr
 import geopandas as gpd
 import matplotlib.pyplot as plt 
 
-# all 22 annual files 
+# all 24 annual files 
 import os
 
 all_files = os.listdir()
