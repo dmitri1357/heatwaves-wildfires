@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+
+# compute timeseries of BA on HW days and 5 days after heatwaves
+# across the 3 ecoregion aggregations
+
+import xarray as xr
+import geopandas as gpd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import linregress
+from tqdm import tqdm
+
+# Load datasets
+wus = xr.open_dataset('wus_ecoregion_data.nc')
+wus_ecoregions = gpd.read_file("wus_ecoregions.shp")
+
+# Get unique ecoregion identifiers
+ecoregion_ids = wus.ecoregion.values
+years = np.arange(2001, 2025)
+
+# Forest/Non-Forest classification (1 = forest, 0 = non-forest)
+forest_boolean_vector = np.array([1,1,1,1,1,1,0,1,1,0,1,0,0,0,1,1,1,0,1,0,1,0,1,1,1,1,1,0,0,1])
+
+# Initialize arrays to store cumulative values for aggregation
+total_burned_all = np.zeros(len(years))
+total_burned_forest = np.zeros(len(years))
+total_burned_nonforest = np.zeros(len(years))
+
+burned_on_hw_all = np.zeros(len(years))
+burned_on_hw_forest = np.zeros(len(years))
+burned_on_hw_nonforest = np.zeros(len(years))
+
+burned_after_hw_all = np.zeros(len(years))
+burned_after_hw_forest = np.zeros(len(years))
+burned_after_hw_nonforest = np.zeros(len(years))
+
+total_hw_days_all = np.zeros(len(years))
+total_hw_days_forest = np.zeros(len(years))
+total_hw_days_nonforest = np.zeros(len(years))
+
+# Process each ecoregion and accumulate the results
+for ecoregion_idx, ecoregion in tqdm(enumerate(ecoregion_ids), total=len(ecoregion_ids)):
+    ecoregion_burned_area = wus.burned_area.sel(ecoregion=ecoregion)
+    ecoregion_tmax_percentile = wus.tmax_percentile.sel(ecoregion=ecoregion)
+
+    # Initialize lists to store yearly masks and burned area data
+    annual_heatwave_masks = []
+    annual_days_after_masks = []
+
+    burned_on_hw_list = []
+    burned_after_hw_list = []
+    total_burned_list = []
+    total_hw_days_list = []
+
+    # **Split the data into 24 separate years before processing**
+    for year in years:
+        # Select data for the current year
+        year_burned_area = ecoregion_burned_area.sel(day=ecoregion_burned_area.day.dt.year == year)
+        year_tmax_percentile = ecoregion_tmax_percentile.sel(day=ecoregion_tmax_percentile.day.dt.year == year)
+
+        # **Identify heatwave days (3+ consecutive days with tmax_percentile > 90)**
+        rolling_sum = (year_tmax_percentile > 90).rolling(day=3, center=False).sum()
+        heatwave_days = rolling_sum >= 3
+
+        # **Expand the heatwave mask to include all days within the heatwave period**
+        expanded_heatwave_mask = heatwave_days.copy()
+        for i in range(1, 3):  # Include up to 2 days before heatwave starts
+            expanded_heatwave_mask |= heatwave_days.shift(day=-i, fill_value=False)
+
+        # Identify the 5 days **after** a heatwave ends (ensuring no overlap with following heatwaves)
+        days_after = xr.full_like(expanded_heatwave_mask, False, dtype=bool)
+
+        for i in range(1, 6):  # Look forward 5 days
+            post_heatwave_day = expanded_heatwave_mask.shift(day=i, fill_value=False)  # Shift forward
+            days_after |= post_heatwave_day  # Combine across all 5 days
+         
+        # Ensure that no post-heatwave days overlap with following heatwaves
+        days_after &= ~expanded_heatwave_mask
+
+        # **Store the masks for yearly concatenation**
+        annual_heatwave_masks.append(expanded_heatwave_mask)
+        annual_days_after_masks.append(days_after)
+
+        # **Compute burned area for heatwave days and post-heatwave days**
+        burned_on_hw = year_burned_area.where(expanded_heatwave_mask).sum(dim="day").item()
+        burned_after_hw = year_burned_area.where(days_after).sum(dim="day").item()
+        total_burned = year_burned_area.sum(dim="day").item()
+        total_hw_days = expanded_heatwave_mask.sum(dim="day").item()
+
+        # Store yearly results
+        burned_on_hw_list.append(burned_on_hw)
+        burned_after_hw_list.append(burned_after_hw)
+        total_burned_list.append(total_burned)
+        total_hw_days_list.append(total_hw_days)
+
+    # **Convert stored lists into NumPy arrays**
+    burned_on_hw = np.array(burned_on_hw_list)
+    burned_after_hw = np.array(burned_after_hw_list)
+    total_burned = np.array(total_burned_list)
+    total_hw_days = np.array(total_hw_days_list)
+
+    # **Aggregate results across all ecoregions**
+    total_burned_all += total_burned
+    burned_on_hw_all += burned_on_hw
+    burned_after_hw_all += burned_after_hw
+    total_hw_days_all += total_hw_days
+
+    # **Aggregate separately for forest and non-forest ecoregions**
+    if forest_boolean_vector[ecoregion_idx] == 1:  # Forest ecoregion
+        total_burned_forest += total_burned
+        burned_on_hw_forest += burned_on_hw
+        burned_after_hw_forest += burned_after_hw
+        total_hw_days_forest += total_hw_days
+    else:  # Non-forest ecoregion
+        total_burned_nonforest += total_burned
+        burned_on_hw_nonforest += burned_on_hw
+        burned_after_hw_nonforest += burned_after_hw
+        total_hw_days_nonforest += total_hw_days
+
+burned_non_hw_all = total_burned_all - burned_on_hw_all - burned_after_hw_all
+burned_non_hw_forest = total_burned_forest - burned_on_hw_forest - burned_after_hw_forest
+burned_non_hw_nonforest = total_burned_nonforest - burned_on_hw_nonforest - burned_after_hw_nonforest
+
+# convert to ha
+burned_on_hw_all = burned_on_hw_all * 100
+burned_after_hw_all = burned_after_hw_all * 100
+total_burned_all = total_burned_all * 100
+burned_on_hw_forest = burned_on_hw_forest * 100
+burned_after_hw_forest = burned_after_hw_forest * 100
+total_burned_forest = total_burned_forest * 100
+burned_on_hw_nonforest = burned_on_hw_nonforest * 100
+burned_after_hw_nonforest = burned_after_hw_nonforest * 100
+total_burned_nonforest = total_burned_nonforest * 100
+burned_non_hw_all = burned_non_hw_all * 100
+burned_non_hw_forest = burned_non_hw_forest * 100
+burned_non_hw_nonforest = burned_non_hw_nonforest * 100
+
+# **Compute aggregate percentages**
+def compute_percentages(burned_on, burned_after, total_burned, burned_non):
+    percent_on = burned_on
+    percent_after = burned_after
+    percent_combined = burned_on + burned_after
+    percent_non = total_burned - burned_on - burned_after
+    return percent_on, percent_after, percent_combined, percent_non
+
+# **Compute annual percentages**
+annual_percent_all = compute_percentages(burned_on_hw_all, burned_after_hw_all, total_burned_all, burned_non_hw_all)
+annual_percent_forest = compute_percentages(burned_on_hw_forest, burned_after_hw_forest, total_burned_forest, burned_non_hw_forest)
+annual_percent_nonforest = compute_percentages(burned_on_hw_nonforest, burned_after_hw_nonforest, total_burned_nonforest, burned_non_hw_nonforest)
+
+# **Compute 24-year aggregated percentages**
+overall_percent_all = compute_percentages(np.sum(burned_on_hw_all), np.sum(burned_after_hw_all), np.sum(total_burned_all), np.sum(burned_non_hw_all))
+overall_percent_forest = compute_percentages(np.sum(burned_on_hw_forest), np.sum(burned_after_hw_forest), np.sum(total_burned_forest), np.sum(burned_non_hw_forest))
+overall_percent_nonforest = compute_percentages(np.sum(burned_on_hw_nonforest), np.sum(burned_after_hw_nonforest), np.sum(total_burned_nonforest), np.sum(burned_non_hw_nonforest))
+
+import matplotlib.pyplot as plt
+from scipy.stats import linregress
+
+# Define years
+years = np.arange(2001, 2025)
+
+# Define markers for consistency across all 3 plots
+markers = ['o', 's', '^']  # Circle, Square, Triangle
+
+# Define text position in each plot
+text_x = 2002  # Position on x-axis
+
+# Fig. 1d - HWall BA
+
+plt.figure(figsize=(8, 6))
+
+text_y_positions = [2.9e6, 2.9e6, 2.7e6]  # Different heights for each timeseries
+
+# Compute trends
+trend_all, intercept_all, _, p_all, _ = linregress(years, annual_percent_all[2])
+trend_forest, intercept_forest, _, p_forest, _ = linregress(years, annual_percent_forest[2])
+trend_nonforest, intercept_nonforest, _, p_nonforest, _ = linregress(years, annual_percent_nonforest[2])
+
+# Plot time series with markers
+#plt.plot(years, annual_percent_all[2], 'k-', marker=markers[0], label="All WUS")
+plt.plot(years, annual_percent_forest[2], color="#228B22", linestyle='-', marker=markers[1], label="Forest")
+plt.plot(years, annual_percent_nonforest[2], color="#964B00", linestyle='-', marker=markers[2], label="Non-Forest")
+
+# Plot trendlines
+#plt.plot(years, trend_all * years + intercept_all, 'k--')
+plt.plot(years, trend_forest * years + intercept_forest, '--', color="#228B22")
+plt.plot(years, trend_nonforest * years + intercept_nonforest, '--', color="#964B00")
+
+# Paste trend values and p-values
+#plt.text(text_x, text_y_positions[0], f"trend = {trend_all:.2f}, p = {p_all:.3f}", fontsize=15, color="black")
+plt.text(text_x, text_y_positions[1], f"trend = {trend_forest:.2f}, p = {p_forest:.3f}", fontsize=15, color="#228B22")
+plt.text(text_x, text_y_positions[2], f"trend = {trend_nonforest:.2f}, p = {p_nonforest:.3f}", fontsize=15, color="#964B00")
+
+#plt.xlabel("Year", fontsize=15)
+plt.ylabel("Hectares", fontsize=20)
+#plt.title("(c) BA during HW + 5 days after", fontsize=20)
+
+plt.xticks(fontsize=15)
+plt.yticks(np.arange(0, 3.01e6, 0.5e6), fontsize=15)
+plt.ylim(-0.1e6,3.1e6)
+
+#plt.legend(fontsize=15, loc="upper right")  # **Legend only in the first figure**
+plt.show()
+
+# Fig. 1c - Total BA
+
+plt.figure(figsize=(8, 6))
+
+text_y_positions = [2.9e6, 2.9e6, 2.7e6]  # Different heights for each timeseries
+
+# Compute trends
+trend_all, intercept_all, _, p_all, _ = linregress(years, total_burned_all)
+trend_forest, intercept_forest, _, p_forest, _ = linregress(years, total_burned_forest)
+trend_nonforest, intercept_nonforest, _, p_nonforest, _ = linregress(years, total_burned_nonforest)
+
+# Plot time series with markers
+#plt.plot(years, total_burned_all, 'k-', marker=markers[0])
+plt.plot(years, total_burned_forest, color="#228B22", linestyle='-', marker=markers[1])
+plt.plot(years, total_burned_nonforest, color="#964B00", linestyle='-', marker=markers[2])
+
+# Plot trendlines
+#plt.plot(years, trend_all * years + intercept_all, 'k--')
+plt.plot(years, trend_forest * years + intercept_forest, '--', color="#228B22")
+plt.plot(years, trend_nonforest * years + intercept_nonforest, '--', color="#964B00")
+
+# Paste trend values and p-values
+#plt.text(text_x, text_y_positions[0], f"trend = {trend_all:.2f}, p = {p_all:.3f}", fontsize=15, color="black")
+plt.text(text_x, text_y_positions[1], f"trend = {trend_forest:.2f}, p = {p_forest:.3f}", fontsize=15, color="#228B22")
+plt.text(text_x, text_y_positions[2], f"trend = {trend_nonforest:.2f}, p = {p_nonforest:.3f}", fontsize=15, color="#964B00")
+
+#plt.xlabel("Year", fontsize=15)
+plt.ylabel("Hectares", fontsize=20)
+plt.title("(e) Total BA", fontsize=20)
+
+plt.xticks(fontsize=15)
+plt.yticks(np.arange(0, 3.01e6, 0.5e6), fontsize=15)
+plt.ylim(-0.1e6,3.1e6)
+
+plt.show()
+
+# Fig. 1e = % of BA that occurred during HWall
+
+plt.figure(figsize=(8, 6))
+
+text_y_positions = [94, 94, 88]  # Different heights for each timeseries
+
+# Compute trends
+trend_all, intercept_all, _, p_all, _ = linregress(years, (annual_percent_all[2]/total_burned_all)*100)
+trend_forest, intercept_forest, _, p_forest, _ = linregress(years, (annual_percent_forest[2]/total_burned_forest)*100)
+trend_nonforest, intercept_nonforest, _, p_nonforest, _ = linregress(years, (annual_percent_nonforest[2]/total_burned_nonforest)*100)
+
+# Plot time series with markers
+#plt.plot(years, (annual_percent_all[2]/total_burned_all)*100, 'k-', marker=markers[0])
+plt.plot(years, (annual_percent_forest[2]/total_burned_forest)*100, color="#228B22", linestyle='-', marker=markers[1])
+plt.plot(years, (annual_percent_nonforest[2]/total_burned_nonforest)*100, color="#964B00", linestyle='-', marker=markers[2])
+
+# Plot trendlines
+#plt.plot(years, trend_all * years + intercept_all, 'k--')
+plt.plot(years, trend_forest * years + intercept_forest, '--', color="#228B22")
+plt.plot(years, trend_nonforest * years + intercept_nonforest, '--', color="#964B00")
+
+# Paste trend values and p-values
+#plt.text(text_x, text_y_positions[0], f"trend = {trend_all:.2f}, p = {p_all:.3f}", fontsize=15, color="black")
+plt.text(text_x, text_y_positions[1], f"trend = {trend_forest:.2f}, p = {p_forest:.3f}", fontsize=15, color="#228B22")
+plt.text(text_x, text_y_positions[2], f"trend = {trend_nonforest:.2f}, p = {p_nonforest:.3f}", fontsize=15, color="#964B00")
+
+#plt.xlabel("Year", fontsize=15)
+plt.ylabel("Percent", fontsize=20)
+#plt.title("Total BA", fontsize=20)
+
+plt.xticks(fontsize=15)
+plt.yticks(np.arange(0, 100.1, 20), fontsize=15)
+plt.ylim(-5,100)
+
+plt.show()
