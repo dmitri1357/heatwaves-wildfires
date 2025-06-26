@@ -1,0 +1,831 @@
+#!/usr/bin/env python3
+
+'''
+Note - this code shows how the BA ratios were calculated during dry HW (panel A) and moist HW (panel D).
+The code to calculate ratios for NFIRE human and natural is the same with only the variable names swapped, and is not shown here.
+'''
+
+# Fig 5a - BA ratios during dry HW
+# note - this code calculates BA ratios for the full warm season plus May-June, July-Aug, and Sep-Oct separately
+# for the paper, I'm only using the aggregate warm season ratios
+
+import xarray as xr
+import geopandas as gpd
+import numpy as np
+from scipy.stats import ks_2samp
+import matplotlib.patches as mpatches
+
+# Load the dataset
+wus = xr.open_dataset('wus_ecoregion_data.nc')
+
+# Load the state boundaries
+states = gpd.read_file('cb_2018_us_state_5m.shp')
+states = states.to_crs("EPSG:4326")
+states = states[states.NAME.isin([
+    'Washington', 'Oregon', 'Idaho', 'Montana',
+    'California', 'Nevada', 'Utah', 'Wyoming',
+    'Colorado', 'Arizona', 'New Mexico'
+])]
+
+# Load the ecoregion shapefile
+wus_ecoregions = gpd.read_file("wus_ecoregions.shp")
+
+# Define overall and bi-monthly periods
+time_masks = {
+    "Warm Season (May-Oct)": None,  # Full time period
+    "May-June": wus.day.dt.month.isin([5, 6]),
+    "July-August": wus.day.dt.month.isin([7, 8]),
+    "Sept-Oct": wus.day.dt.month.isin([9, 10])
+}
+
+# Initialize dictionaries to store results
+results, results_actual_values, significance_results = {}, {}, {}
+results75, results_actual_values75, significance_results75 = {}, {}, {}
+results25, results_actual_values25, significance_results25 = {}, {}, {}
+significance_results_diff = {}
+
+# Get unique ecoregion identifiers
+ecoregion_ids = wus.ecoregion.values
+
+number_of_dry_heatwaves = []
+number_of_moist_heatwaves = []
+
+annual_dry_hw = np.empty([30,24])
+annual_moist_hw = np.empty([30,24])
+
+for period, mask in time_masks.items():
+    wus_subset = wus.sel(day=mask) if mask is not None else wus
+
+    # Initialize arrays to store results for each ecoregion
+    burned_area_ratio = xr.full_like(wus_subset.burned_area.mean(dim='day'), np.nan)
+    burned_area_actual = xr.full_like(wus_subset.burned_area.mean(dim='day'), np.nan)
+    significance_flags = []
+
+    burned_area_ratio_75 = xr.full_like(burned_area_ratio, np.nan)
+    burned_area_actual_75 = xr.full_like(burned_area_ratio, np.nan)
+    significance_flags_75 = []
+
+    burned_area_ratio_25 = xr.full_like(burned_area_ratio, np.nan)
+    burned_area_actual_25 = xr.full_like(burned_area_ratio, np.nan)
+    significance_flags_25 = []
+    
+    significance_flags_diff = [] # difference between daily-average BA on <25th vs >75th percentile RH HWD
+
+    # Process each ecoregion
+    for idx, ecoregion in enumerate(ecoregion_ids):
+        ecoregion_burned_area = wus_subset.burned_area.sel(ecoregion=ecoregion)
+        ecoregion_tmax_percentile = wus_subset.tmax_percentile.sel(ecoregion=ecoregion)
+        ecoregion_rh = wus_subset.minimum_rh.sel(ecoregion=ecoregion) # flip to VPD
+
+        annual_expanded_heatwave_masks, annual_below_90_masks = [], []
+
+        # Split data into 24 years for processing
+        heatwave_rh_values = []
+        for year in np.arange(2001, 2025):
+            year_burned_area = ecoregion_burned_area.sel(day=ecoregion_burned_area.day.dt.year == year)
+            year_tmax_percentile = ecoregion_tmax_percentile.sel(day=ecoregion_tmax_percentile.day.dt.year == year)
+            year_rh = ecoregion_rh.sel(day=ecoregion_rh.day.dt.year == year)
+
+            # Identify heatwave days (3+ consecutive days with tmax_percentile > 90)
+            rolling_sum = (year_tmax_percentile > 90).rolling(day=3, center=False).sum()
+            heatwave_days = rolling_sum >= 3
+
+            # Expand the heatwave mask to include all days within the heatwave period
+            expanded_heatwave_mask = heatwave_days.copy()
+            for i in range(1, 3):  # Backfill exactly 2 days before a heatwave starts
+                expanded_heatwave_mask |= heatwave_days.shift(day=-i, fill_value=False)
+
+            # Store RH values for heatwave days
+            if np.sum(expanded_heatwave_mask.values) >= 1:
+                heatwave_rh_values.extend(year_rh.where(expanded_heatwave_mask, drop=True).values)
+            
+            # Identify the 3 days **before** a heatwave starts (ensuring no overlap with previous heatwaves)
+            pre_heatwave_mask = xr.full_like(expanded_heatwave_mask, False, dtype=bool)
+
+            for i in range(1, 6):  # Look back 3 days
+                pre_heatwave_day = expanded_heatwave_mask.shift(day=-i, fill_value=False)  # Shift backward
+                pre_heatwave_mask |= pre_heatwave_day  # Combine across all 3 days
+            
+            # Ensure that no pre-heatwave days overlap with earlier heatwaves
+            pre_heatwave_mask &= ~expanded_heatwave_mask
+
+            # Append the yearly masks to the lists
+            annual_expanded_heatwave_masks.append(expanded_heatwave_mask)
+            annual_below_90_masks.append(pre_heatwave_mask)
+
+        # Compute 25th and 75th percentiles for RH on heatwave days
+        heatwave_rh_values = np.array(heatwave_rh_values)
+        # Check if the list is empty before computing percentiles
+        if len(heatwave_rh_values) > 0:
+            rh_25, rh_75 = np.nanpercentile(heatwave_rh_values, [25, 75])
+        else:
+            rh_25, rh_75 = np.nan, np.nan  # Assign NaN values if the array is empty
+
+        # Concatenate yearly masks into a full-period mask
+        expanded_heatwave_mask = xr.concat(annual_expanded_heatwave_masks, dim="day")
+        below_90_mask = xr.concat(annual_below_90_masks, dim="day")
+        
+        # Identify high and low RH heatwaves 
+        if expanded_heatwave_mask.any():  # Check for at least one heatwave
+            rh_values = ecoregion_rh.where(expanded_heatwave_mask)
+            
+            # Identify temporally contiguous heatwave events
+            heatwave_groups = np.split(rh_values, np.where(np.diff(expanded_heatwave_mask) == 1)[0] + 1)
+            
+            # Create an array to store average RH values
+            rh_avg_values = xr.full_like(rh_values, np.nan)  # Start with NaNs
+        
+            # Iterate over heatwave groups
+            start_idx = 0  # Track index in original array
+            for hw in heatwave_groups:
+                if np.any(~np.isnan(hw)):  # Only process if it's a valid heatwave with data
+                    avg_rh = np.nanmean(hw)  # Compute the mean RH for the heatwave
+                    rh_avg_values[start_idx : start_idx + len(hw)] = avg_rh  # Assign to all days
+                start_idx += len(hw)  # Update index tracker
+        
+            # Use the averaged RH values for threshold comparisons
+            high_rh_heatwave_mask = expanded_heatwave_mask & (rh_avg_values > rh_75) # changed to avg. values across HW days
+            low_rh_heatwave_mask = expanded_heatwave_mask & (rh_avg_values < rh_25) # changed to avg. values across HW days
+        
+        else:
+            high_rh_heatwave_mask = xr.full_like(expanded_heatwave_mask, False, dtype=bool)
+            low_rh_heatwave_mask = xr.full_like(expanded_heatwave_mask, False, dtype=bool)
+ 
+        # Apply masks to burned area
+        burned_area_heatwave = ecoregion_burned_area.where(expanded_heatwave_mask, drop=True)
+        burned_area_below_90 = ecoregion_burned_area.where(below_90_mask, drop=True)
+        
+        burned_area_heatwave_75 = ecoregion_burned_area.where(high_rh_heatwave_mask, drop=True)
+        burned_area_heatwave_25 = ecoregion_burned_area.where(low_rh_heatwave_mask, drop=True)
+        
+        # need to collect the number of dry and moist heatwaves across the period of record in each ecoregion
+        # Initialize storage for annual dry and moist heatwave counts
+        annual_dry_hw_counts = np.zeros(24, dtype=int)
+        annual_moist_hw_counts = np.zeros(24, dtype=int)
+        
+        if period == "Warm Season (May-Oct)":
+            for year_idx, year in enumerate(np.arange(2001, 2025)):
+                # Extract annual masks
+                high_rh_annual = high_rh_heatwave_mask.sel(day=high_rh_heatwave_mask.day.dt.year == year).values
+                low_rh_annual = low_rh_heatwave_mask.sel(day=low_rh_heatwave_mask.day.dt.year == year).values
+        
+                # Count moist heatwaves
+                streak_starts_moist = np.flatnonzero((high_rh_annual[:-1] == False) & (high_rh_annual[1:] == True))
+                annual_moist_hw_counts[year_idx] = len(streak_starts_moist)
+                annual_moist_hw[idx, year_idx] = len(streak_starts_moist) 
+                # the two lines above are somewhat redundant, but they're both needed
+        
+                # Count dry heatwaves
+                streak_starts_dry = np.flatnonzero((low_rh_annual[:-1] == False) & (low_rh_annual[1:] == True))
+                annual_dry_hw_counts[year_idx] = len(streak_starts_dry)
+                annual_dry_hw[idx, year_idx] = len(streak_starts_dry) 
+                # the two lines above are somewhat redundant, but they're both needed
+        
+            # Total counts over full period 
+            number_of_moist_heatwaves.append(np.sum(annual_moist_hw_counts))
+            number_of_dry_heatwaves.append(np.sum(annual_dry_hw_counts))
+
+        # Compute mean burned area for each subset
+        avg_burned_heatwave = burned_area_heatwave.mean(dim='day', skipna=True)
+        avg_burned_below_90 = burned_area_below_90.mean(dim='day', skipna=True)
+
+        avg_burned_heatwave_75 = burned_area_heatwave_75.mean(dim='day', skipna=True)
+        avg_burned_heatwave_25 = burned_area_heatwave_25.mean(dim='day', skipna=True)
+
+        # Calculate the burned area ratio, handling division by zero
+        if avg_burned_below_90 > 0 and np.sum(expanded_heatwave_mask.values) >= 20:
+            burned_area_ratio.loc[ecoregion] = avg_burned_heatwave / avg_burned_below_90
+            burned_area_actual.loc[ecoregion] = avg_burned_heatwave
+
+        if avg_burned_below_90 > 0 and np.sum(high_rh_heatwave_mask.values) >= 20:
+            burned_area_ratio_75.loc[ecoregion] = avg_burned_heatwave_75 / avg_burned_below_90
+            burned_area_actual_75.loc[ecoregion] = avg_burned_heatwave_75
+
+        if avg_burned_below_90 > 0 and np.sum(low_rh_heatwave_mask.values) >= 20:
+            burned_area_ratio_25.loc[ecoregion] = avg_burned_heatwave_25 / avg_burned_below_90
+            burned_area_actual_25.loc[ecoregion] = avg_burned_heatwave_25
+            
+        # Perform K-S test for standard heatwave vs. non-heatwave comparison
+        heatwave_values = burned_area_heatwave.values[~np.isnan(burned_area_heatwave.values)]
+        below_90_values = burned_area_below_90.values[~np.isnan(burned_area_below_90.values)]
+        
+        if len(heatwave_values) > 0 and avg_burned_below_90 > 0 and len(below_90_values) > 0 and np.sum(expanded_heatwave_mask.values) >= 20:
+            _, p_value = ks_2samp(heatwave_values, below_90_values)
+            significance_flags.append(p_value < 0.1)  # True if significant
+        else:
+            significance_flags.append(False)
+        
+        # Perform K-S test for >75th percentile RH heatwaves vs. non-heatwave days
+        high_rh_heatwave_values = burned_area_heatwave_75.values[~np.isnan(burned_area_heatwave_75.values)]
+        
+        if len(high_rh_heatwave_values) > 0 and avg_burned_below_90 > 0 and len(below_90_values) > 0 and np.sum(high_rh_heatwave_mask.values) >= 20:
+            _, p_value_75 = ks_2samp(high_rh_heatwave_values, below_90_values)
+            significance_flags_75.append(p_value_75 < 0.1)
+        else:
+            significance_flags_75.append(False)
+        
+        # Perform K-S test for <25th percentile RH heatwaves vs. non-heatwave days
+        low_rh_heatwave_values = burned_area_heatwave_25.values[~np.isnan(burned_area_heatwave_25.values)]
+        
+        if len(low_rh_heatwave_values) > 0 and avg_burned_below_90 > 0 and len(below_90_values) > 0 and np.sum(low_rh_heatwave_mask.values) >= 20:
+            _, p_value_25 = ks_2samp(low_rh_heatwave_values, below_90_values)
+            significance_flags_25.append(p_value_25 < 0.1)
+        else:
+            significance_flags_25.append(False)
+            
+        # Perform K-S test for <25th percentile RH heatwaves vs. >75th percentile RH heatwaves        
+        if len(low_rh_heatwave_values) > 0 and avg_burned_below_90 > 0 and len(below_90_values) > 0 and np.sum(low_rh_heatwave_mask.values) >= 20: # leave this as-is
+            _, p_value_diff = ks_2samp(low_rh_heatwave_values, high_rh_heatwave_values)
+            significance_flags_diff.append(p_value_diff < 0.1)
+        else:
+            significance_flags_diff.append(False)
+
+        # Store results
+    results[period], results_actual_values[period], significance_results[period] = burned_area_ratio, burned_area_actual, significance_flags
+    results75[period], results_actual_values75[period], significance_results75[period] = burned_area_ratio_75, burned_area_actual_75, significance_flags_75
+    results25[period], results_actual_values25[period], significance_results25[period] = burned_area_ratio_25, burned_area_actual_25, significance_flags_25
+    significance_results_diff[period] = significance_flags_diff
+
+import pandas as pd
+
+number_of_heatwaves = pd.DataFrame({'Ecoregion':wus.ecoregion.values,
+                                    'Dry HW':number_of_dry_heatwaves,
+                                    'Moist HW':number_of_moist_heatwaves})
+
+# trends in dry/moist HWs by landcover type
+
+forest_boolean_vector = np.array([1,1,1,1,1,1,0,1,1,0,1,0,0,0,1,1,1,0,1,0,1,0,1,1,1,1,1,0,0,1])
+
+# break out by forest/non-forest
+forest_dry_hw = annual_dry_hw[forest_boolean_vector==1,:]
+nonforest_dry_hw = annual_dry_hw[forest_boolean_vector==0,:]
+forest_dry_mean = np.mean(forest_dry_hw,axis=0)
+nonforest_dry_mean = np.mean(nonforest_dry_hw,axis=0)
+
+forest_moist_hw = annual_moist_hw[forest_boolean_vector==1,:]
+nonforest_moist_hw = annual_moist_hw[forest_boolean_vector==0,:]
+forest_moist_mean = np.mean(forest_moist_hw,axis=0)
+nonforest_moist_mean = np.mean(nonforest_moist_hw,axis=0)
+
+import matplotlib.pyplot as plt
+from scipy.stats import linregress
+
+# Define years
+years = np.arange(2001, 2025)
+
+# Define markers for consistency across all 3 plots
+markers = ['o', 's', '^']  # Circle, Square, Triangle
+
+# Define text position in each plot
+text_x = 2002  # Position on x-axis
+text_y_positions = [77000, 1.85, 1.72]  # Different heights for each timeseries
+yticks = np.arange(0,2.1,0.5)
+
+# Fig. 5g - trends in dry HW
+
+plt.figure(figsize=(8, 6))
+
+# Compute trends
+#trend_all, intercept_all, _, p_all, _ = linregress(years, burned_on_hw_all)
+trend_forest, intercept_forest, _, p_forest, _ = linregress(years, forest_dry_mean)
+trend_nonforest, intercept_nonforest, _, p_nonforest, _ = linregress(years, nonforest_dry_mean)
+
+# Plot time series with markers
+#plt.plot(years, annual_percent_all[0], 'k-', marker=markers[0], label="All WUS")
+plt.plot(years, forest_dry_mean, color="#228B22", linestyle='-', marker=markers[1], label="Forest")
+plt.plot(years, nonforest_dry_mean, color="#964B00", linestyle='-', marker=markers[2], label="Non-Forest")
+
+# Plot trendlines
+#plt.plot(years, trend_all * years + intercept_all, 'k--')
+plt.plot(years, trend_forest * years + intercept_forest, '--', color="#228B22")
+plt.plot(years, trend_nonforest * years + intercept_nonforest, '--', color="#964B00")
+
+# Paste trend values and p-values
+#plt.text(text_x, text_y_positions[0], f"trend = {trend_all:.2f}, p = {p_all:.3f}", fontsize=15, color="black")
+plt.text(text_x, text_y_positions[1], f"trend = {trend_forest:.3f}, p = {p_forest:.3f}", fontsize=20, color="#228B22")
+plt.text(text_x, text_y_positions[2], f"trend = {trend_nonforest:.3f}, p = {p_nonforest:.3f}", fontsize=20, color="#964B00")
+
+plt.ylabel("Number of events", fontsize=20)
+#plt.xlabel("Year", fontsize=15)
+#plt.ylabel("Hectares/day", fontsize=20)
+#plt.title("Average HW length", fontsize=20)
+
+plt.xticks(fontsize=20)
+plt.yticks(yticks, fontsize=20)
+
+plt.legend(fontsize=20, loc="upper right")  # **Legend only in the first figure**
+plt.show()
+
+# Fig. 5h - trends in moist HW
+
+plt.figure(figsize=(8, 6))
+
+# Compute trends
+#trend_all, intercept_all, _, p_all, _ = linregress(years, burned_on_hw_all)
+trend_forest, intercept_forest, _, p_forest, _ = linregress(years, forest_moist_mean)
+trend_nonforest, intercept_nonforest, _, p_nonforest, _ = linregress(years, nonforest_moist_mean)
+
+# Plot time series with markers
+#plt.plot(years, annual_percent_all[0], 'k-', marker=markers[0], label="All WUS")
+plt.plot(years, forest_moist_mean, color="#228B22", linestyle='-', marker=markers[1], label="Forest")
+plt.plot(years, nonforest_moist_mean, color="#964B00", linestyle='-', marker=markers[2], label="Non-Forest")
+
+# Plot trendlines
+#plt.plot(years, trend_all * years + intercept_all, 'k--')
+plt.plot(years, trend_forest * years + intercept_forest, '--', color="#228B22")
+plt.plot(years, trend_nonforest * years + intercept_nonforest, '--', color="#964B00")
+
+# Paste trend values and p-values
+#plt.text(text_x, text_y_positions[0], f"trend = {trend_all:.2f}, p = {p_all:.3f}", fontsize=15, color="black")
+plt.text(text_x, text_y_positions[1], f"trend = {trend_forest:.3f}, p = {p_forest:.3f}", fontsize=20, color="#228B22")
+plt.text(text_x, text_y_positions[2], f"trend = {trend_nonforest:.3f}, p = {p_nonforest:.3f}", fontsize=20, color="#964B00")
+
+plt.ylabel("Number of events", fontsize=20)
+#plt.xlabel("Year", fontsize=15)
+#plt.ylabel("Hectares/day", fontsize=20)
+#plt.title("Average HW length", fontsize=20)
+
+plt.xticks(fontsize=20)
+plt.yticks(yticks, fontsize=20)
+plt.ylim(bottom=-0.08)
+
+#plt.legend(fontsize=20, loc="upper right")  # **Legend only in the first figure**
+plt.show()
+
+# Fig. 5a - dry HW ratios
+
+# plot <25th percentile heatwaves 
+
+# repeat the above plotting with new bins and non-linear colorbar
+
+import matplotlib as mpl
+from matplotlib.colors import ListedColormap, BoundaryNorm
+
+# **Define bin edges**
+bins = np.array([
+    0.1, 0.133, 0.2, 0.25, 0.333, 0.4, 0.5, 0.667, 0.8, 0.909, 1, 1.1, 1.25, 1.5, 2, 2.5, 3, 4, 
+    5, 7.5, 10
+])
+
+# **Manually define blue shades** (negative bins, from darkest to lightest)
+blue_colors = [
+    "#08306b",  # New darkest blue
+    "#08519c",
+    "#2171b5",
+    "#4292c6",
+    "#6baed6",
+    "#9ecae1",
+    "#b3d3e8",
+    "#c6dbef",
+    "#dceaf3",
+    "#eff7fc",
+    "#f7fbff"  # Lightest blue
+]
+
+# **Manually define orange shades** (positive bins, from light to dark burnt orange)
+red_colors = [
+    "#fee5d9",  # NEW Lightest red
+    "#fee0d2",  
+    "#fcbba1",  
+    "#fc9272",  
+    "#fb6a4a",  
+    "#ef3b2c",  
+    "#cb181d",  
+    "#a50f15",  
+    "#870c12",  
+    "#67000d",  
+    "#58000a"   # Darkest red
+]
+
+# **Combine the updated blues and oranges**
+custom_colors = blue_colors + red_colors
+
+# Create colormap and normalizer
+custom_cmap = ListedColormap(custom_colors)
+norm = BoundaryNorm(bins, custom_cmap.N)
+
+# Plot the results
+fig, axes = plt.subplots(1, 4, figsize=(24, 6), constrained_layout=True)
+
+for ax, (period, ratios) in zip(axes, results25.items()):
+    ecoregions = wus_ecoregions.copy()
+    ecoregions['burned_area_ratio'] = ratios.values
+    ecoregions["is_significant"] = significance_results25[period]
+
+    ecoregions.plot(column='burned_area_ratio', 
+                    vmin = 0, vmax = 10, norm=norm,
+                    ax=ax, cmap=custom_cmap, legend=False,
+                    missing_kwds={'color': '0.8', 'label': 'No Data'})
+
+    states.boundary.plot(ax=ax, edgecolor='k', lw=1)
+    wus_ecoregions.boundary.plot(ax=ax, edgecolor="black", linewidth=0.5)
+    
+    # extract the plotted color for the Central Valley (#7) for overplotting on map
+    value = ecoregions.loc[ecoregions["US_L3CODE"] == 7, "burned_area_ratio"].values[0]
+
+    # Find the index in the colormap
+    color_index = norm(value)
+
+    # Extract the RGB color from the ListedColormap
+    rgb_color = custom_cmap.colors[color_index] if ~np.isnan(value) else "0.8"
+    
+    # Add hatching for significant ecoregions
+    for _, row in ecoregions.iterrows():
+        if row["is_significant"]:  # Check significance flag
+            if row.geometry.geom_type == "Polygon":
+                polygons = [row.geometry]
+            elif row.geometry.geom_type == "MultiPolygon":
+                polygons = row.geometry.geoms  # Extract individual polygons
+            else:
+                polygons = []
+
+            for poly in polygons:
+                patch = mpatches.Polygon(np.array(poly.exterior.coords),
+                                         facecolor="none", edgecolor="k",
+                                         hatch="..", linewidth=1, zorder=100)
+                ax.add_patch(patch)
+        # handle the weird situation where the Central Valley (#7) gets overplotted by ecoregion #6 hatching
+        elif row['L3_KEY'] == '7  Central California Valley' and row['is_significant'] == False and ecoregions.loc[5]['is_significant'] == True:
+            polygons = [row.geometry]
+            for poly in polygons:
+                patch = mpatches.Polygon(np.array(poly.exterior.coords),
+                                          facecolor=rgb_color, edgecolor="k",
+                                          hatch="", linewidth=1, zorder=101)
+                ax.add_patch(patch)
+
+    ax.set_title(period)
+    ax.set_axis_off()
+
+# Add a single horizontal colorbar beneath the maps
+cbar = fig.colorbar(
+    mpl.cm.ScalarMappable(cmap=custom_cmap, norm=norm),
+    ax=axes,
+    orientation='horizontal',
+    extend='max',
+    fraction=0.025,  # control the length
+    pad=0.05,             # Keep the colorbar close to the maps
+    aspect=50,           # control the width
+    ticks=bins[::1]  # Show ticks for every other bin
+)
+
+#cbar.set_label("Burned Area Ratio")
+
+#plt.suptitle("BA ratio during heatwaves vs. non-heatwave days")
+plt.show()
+
+vals = results25['Warm Season (May-Oct)'].values
+names = ecoregions.US_L3NAME
+blah = pd.DataFrame({'eco':names,'val':vals})
+
+# Fig. 5d - dry HW ratios
+
+# plot >75th percentile heatwaves 
+
+# repeat the above plotting with new bins and non-linear colorbar
+
+import matplotlib as mpl
+from matplotlib.colors import ListedColormap, BoundaryNorm
+
+# **Define bin edges**
+bins = np.array([
+    0.1, 0.133, 0.2, 0.25, 0.333, 0.4, 0.5, 0.667, 0.8, 0.909, 1, 1.1, 1.25, 1.5, 2, 2.5, 3, 4, 
+    5, 7.5, 10
+])
+
+# **Manually define blue shades** (negative bins, from darkest to lightest)
+blue_colors = [
+    "#08306b",  # New darkest blue
+    "#08519c",
+    "#2171b5",
+    "#4292c6",
+    "#6baed6",
+    "#9ecae1",
+    "#b3d3e8",
+    "#c6dbef",
+    "#dceaf3",
+    "#eff7fc",
+    "#f7fbff"  # Lightest blue
+]
+
+# **Manually define orange shades** (positive bins, from light to dark burnt orange)
+red_colors = [
+    "#fee5d9",  # NEW Lightest red
+    "#fee0d2",  
+    "#fcbba1",  
+    "#fc9272",  
+    "#fb6a4a",  
+    "#ef3b2c",  
+    "#cb181d",  
+    "#a50f15",  
+    "#870c12",  
+    "#67000d",  
+    "#58000a"   # Darkest red
+]
+
+# **Combine the updated blues and oranges**
+custom_colors = blue_colors + red_colors
+
+# Create colormap and normalizer
+custom_cmap = ListedColormap(custom_colors)
+norm = BoundaryNorm(bins, custom_cmap.N)
+
+# Plot the results
+fig, axes = plt.subplots(1, 4, figsize=(24, 6), constrained_layout=True)
+
+for ax, (period, ratios) in zip(axes, results75.items()):
+    ecoregions = wus_ecoregions.copy()
+    ecoregions['burned_area_ratio'] = ratios.values
+    ecoregions["is_significant"] = significance_results75[period]
+
+    ecoregions.plot(column='burned_area_ratio', 
+                    vmin = 0, vmax = 10, norm=norm,
+                    ax=ax, cmap=custom_cmap, legend=False,
+                    missing_kwds={'color': '0.8', 'label': 'No Data'})
+
+    states.boundary.plot(ax=ax, edgecolor='k', lw=1)
+    wus_ecoregions.boundary.plot(ax=ax, edgecolor="black", linewidth=0.5)
+    
+    # extract the plotted color for the Central Valley (#7) for overplotting on map
+    value = ecoregions.loc[ecoregions["US_L3CODE"] == 7, "burned_area_ratio"].values[0]
+
+    # Find the index in the colormap
+    color_index = norm(value)
+
+    # Extract the RGB color from the ListedColormap
+    rgb_color = custom_cmap.colors[color_index] if ~np.isnan(value) else "0.8"
+    
+    # Add hatching for significant ecoregions
+    for _, row in ecoregions.iterrows():
+        if row["is_significant"]:  # Check significance flag
+            if row.geometry.geom_type == "Polygon":
+                polygons = [row.geometry]
+            elif row.geometry.geom_type == "MultiPolygon":
+                polygons = row.geometry.geoms  # Extract individual polygons
+            else:
+                polygons = []
+
+            for poly in polygons:
+                patch = mpatches.Polygon(np.array(poly.exterior.coords),
+                                         facecolor="none", edgecolor="k",
+                                         hatch="..", linewidth=1, zorder=100)
+                ax.add_patch(patch)
+        # handle the weird situation where the Central Valley (#7) gets overplotted by ecoregion #6 hatching
+        elif row['L3_KEY'] == '7  Central California Valley' and row['is_significant'] == False and ecoregions.loc[5]['is_significant'] == True:
+            polygons = [row.geometry]
+            for poly in polygons:
+                patch = mpatches.Polygon(np.array(poly.exterior.coords),
+                                          facecolor=rgb_color, edgecolor="k",
+                                          hatch="", linewidth=1, zorder=101)
+                ax.add_patch(patch)
+
+    ax.set_title(period)
+    ax.set_axis_off()
+
+# Add a single horizontal colorbar beneath the maps
+cbar = fig.colorbar(
+    mpl.cm.ScalarMappable(cmap=custom_cmap, norm=norm),
+    ax=axes,
+    orientation='horizontal',
+    extend='max',
+    fraction=0.025,  # control the length
+    pad=0.05,             # Keep the colorbar close to the maps
+    aspect=50,           # control the width
+    ticks=bins[::1]  # Show ticks for every other bin
+)
+
+#cbar.set_label("Burned Area Ratio")
+
+#plt.suptitle("BA ratio during heatwaves vs. non-heatwave days")
+plt.show()
+
+# Fig. 5i - RHmin trends during HW
+
+# note that for convenience I'm reusing the variable names from BA, but this is actaully RHmin
+
+import xarray as xr
+import geopandas as gpd
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.stats import linregress
+from tqdm import tqdm
+
+# Load datasets
+wus = xr.open_dataset('wus_ecoregion_data.nc')
+wus_ecoregions = gpd.read_file("wus_ecoregions.shp")
+
+# Get unique ecoregion identifiers
+ecoregion_ids = wus.ecoregion.values
+years = np.arange(2001, 2025)
+
+# Forest/Non-Forest classification (1 = forest, 0 = non-forest)
+forest_boolean_vector = np.array([1,1,1,1,1,1,0,1,1,0,1,0,0,0,1,1,1,0,1,0,1,0,1,1,1,1,1,0,0,1])
+
+# Initialize arrays to store cumulative values for aggregation
+total_burned_all = np.zeros([30,24])
+total_burned_forest = []
+total_burned_nonforest = []
+
+burned_on_hw_all = np.zeros([30,24])
+burned_on_hw_forest = []
+burned_on_hw_nonforest = []
+
+burned_after_hw_all = np.zeros([30,24])
+burned_after_hw_forest = []
+burned_after_hw_nonforest = []
+
+burned_combined_all = np.zeros([30,24])
+burned_combined_forest = []
+burned_combined_nonforest = []
+
+total_hw_days_all = np.zeros(len(years))
+total_hw_days_forest = np.zeros(len(years))
+total_hw_days_nonforest = np.zeros(len(years))
+
+total_after_hw_days_all = np.zeros(len(years))
+total_after_hw_days_forest = np.zeros(len(years))
+total_after_hw_days_nonforest = np.zeros(len(years))
+
+# on 4/10/2025, adding this to collect ecoregion-level RHmin data
+rhmin_ecoregions = np.empty([30,24])
+
+# Process each ecoregion and accumulate the results
+for ecoregion_idx, ecoregion in tqdm(enumerate(ecoregion_ids), total=len(ecoregion_ids)):
+    ecoregion_burned_area = wus.minimum_rh.sel(ecoregion=ecoregion) # flipped to ERC from BA
+    ecoregion_tmax_percentile = wus.tmax_percentile.sel(ecoregion=ecoregion)
+
+    # Initialize lists to store yearly masks and burned area data
+    annual_heatwave_masks = []
+    annual_days_after_masks = []
+
+    burned_on_hw_list = []
+    burned_after_hw_list = []
+    burned_combined_list = []
+    total_burned_list = []
+    total_hw_days_list = []
+    total_after_hw_days_list = []
+
+    # **Split the data into 24 separate years before processing**
+    for year_idx, year in enumerate(years):
+        # Select data for the current year
+        year_burned_area = ecoregion_burned_area.sel(day=ecoregion_burned_area.day.dt.year == year)
+        year_tmax_percentile = ecoregion_tmax_percentile.sel(day=ecoregion_tmax_percentile.day.dt.year == year)
+
+        # **Identify heatwave days (3+ consecutive days with tmax_percentile > 90)**
+        rolling_sum = (year_tmax_percentile > 90).rolling(day=3, center=False).sum()
+        heatwave_days = rolling_sum >= 3
+
+        # **Expand the heatwave mask to include all days within the heatwave period**
+        expanded_heatwave_mask = heatwave_days.copy()
+        for i in range(1, 3):  # Include up to 2 days before heatwave starts
+            expanded_heatwave_mask |= heatwave_days.shift(day=-i, fill_value=False)
+
+        # Identify the 5 days **after** a heatwave ends (ensuring no overlap with following heatwaves)
+        days_after = xr.full_like(expanded_heatwave_mask, False, dtype=bool)
+
+        for i in range(1, 6):  # Look forward 5 days
+            post_heatwave_day = expanded_heatwave_mask.shift(day=i, fill_value=False)  # Shift forward
+            days_after |= post_heatwave_day  # Combine across all 5 days
+         
+        # Ensure that no post-heatwave days overlap with following heatwaves
+        days_after &= ~expanded_heatwave_mask
+
+        # **Store the masks for yearly concatenation**
+        annual_heatwave_masks.append(expanded_heatwave_mask)
+        annual_days_after_masks.append(days_after)
+
+        # **Compute burned area for heatwave days and post-heatwave days**
+        burned_on_hw = year_burned_area.where(expanded_heatwave_mask).mean(dim="day").item() # changed to mean
+        burned_after_hw = year_burned_area.where(days_after).mean(dim="day").item() # changed to mean
+        burned_combined = year_burned_area.where(expanded_heatwave_mask|days_after).mean(dim="day").item() 
+        total_burned = year_burned_area.mean(dim="day").item() # changed to mean
+        total_hw_days = expanded_heatwave_mask.sum(dim="day").item()
+        total_after_hw_days = days_after.sum(dim="day").item()
+
+        # Store yearly results
+        burned_on_hw_list.append(burned_on_hw)
+        burned_after_hw_list.append(burned_after_hw)
+        burned_combined_list.append(burned_combined)
+        total_burned_list.append(total_burned)
+        total_hw_days_list.append(total_hw_days)
+        total_after_hw_days_list.append(total_after_hw_days)
+        
+        # adding on 4/10/2025
+        rhmin_ecoregions[ecoregion_idx, year_idx] = burned_on_hw
+
+    # **Convert stored lists into NumPy arrays**
+    burned_on_hw = np.array(burned_on_hw_list)
+    burned_after_hw = np.array(burned_after_hw_list)
+    burned_combined = np.array(burned_combined_list)
+    total_burned = np.array(total_burned_list)
+    total_hw_days = np.array(total_hw_days_list)
+    total_after_hw_days = np.array(total_after_hw_days_list)
+
+    # **Aggregate results across all ecoregions**
+    total_burned_all[ecoregion_idx,:] = total_burned # changed
+    burned_on_hw_all[ecoregion_idx,:] = burned_on_hw # changed
+    burned_after_hw_all[ecoregion_idx,:] = burned_after_hw # changed
+    burned_combined_all[ecoregion_idx,:] = burned_combined
+    total_hw_days_all += total_hw_days
+    total_after_hw_days_all += total_after_hw_days
+
+    # **Aggregate separately for forest and non-forest ecoregions**
+    if forest_boolean_vector[ecoregion_idx] == 1:  # Forest ecoregion
+        total_burned_forest.extend(total_burned) # changed
+        burned_on_hw_forest.extend(burned_on_hw) # changed
+        burned_after_hw_forest.extend(burned_after_hw) # changed
+        burned_combined_forest.extend(burned_combined) 
+        total_hw_days_forest += total_hw_days
+        total_after_hw_days_forest += total_after_hw_days
+    else:  # Non-forest ecoregion
+        total_burned_nonforest.extend(total_burned) # changed
+        burned_on_hw_nonforest.extend(burned_on_hw) # changed
+        burned_after_hw_nonforest.extend(burned_after_hw) # changed
+        burned_combined_nonforest.extend(burned_combined) 
+        total_hw_days_nonforest += total_hw_days
+        total_after_hw_days_nonforest += total_after_hw_days
+
+total_burned_all = np.nanmean(total_burned_all, axis=0)
+burned_on_hw_all = np.nanmean(burned_on_hw_all, axis=0)
+burned_after_hw_all = np.nanmean(burned_after_hw_all, axis=0)
+burned_combined_all = np.nanmean(burned_combined_all, axis=0)
+
+total_burned_forest = np.array(total_burned_forest)
+total_burned_forest = np.array(np.split(total_burned_forest,20))
+total_burned_forest = np.nanmean(total_burned_forest, axis=0)
+
+burned_on_hw_forest = np.array(burned_on_hw_forest)
+burned_on_hw_forest = np.array(np.split(burned_on_hw_forest,20))
+burned_on_hw_forest = np.nanmean(burned_on_hw_forest, axis=0)
+
+burned_after_hw_forest = np.array(burned_after_hw_forest)
+burned_after_hw_forest = np.array(np.split(burned_after_hw_forest,20))
+burned_after_hw_forest = np.nanmean(burned_after_hw_forest, axis=0)
+
+burned_combined_forest = np.array(burned_combined_forest)
+burned_combined_forest = np.array(np.split(burned_combined_forest,20))
+burned_combined_forest = np.nanmean(burned_combined_forest, axis=0)
+
+total_burned_nonforest = np.array(total_burned_nonforest)
+total_burned_nonforest = np.array(np.split(total_burned_nonforest,10))
+total_burned_nonforest = np.nanmean(total_burned_nonforest, axis=0)
+
+burned_on_hw_nonforest = np.array(burned_on_hw_nonforest)
+burned_on_hw_nonforest = np.array(np.split(burned_on_hw_nonforest,10))
+burned_on_hw_nonforest = np.nanmean(burned_on_hw_nonforest, axis=0)
+
+burned_after_hw_nonforest = np.array(burned_after_hw_nonforest)
+burned_after_hw_nonforest = np.array(np.split(burned_after_hw_nonforest,10))
+burned_after_hw_nonforest = np.nanmean(burned_after_hw_nonforest, axis=0)
+
+burned_combined_nonforest = np.array(burned_combined_nonforest)
+burned_combined_nonforest = np.array(np.split(burned_combined_nonforest,10))
+burned_combined_nonforest = np.nanmean(burned_combined_nonforest, axis=0)
+
+import matplotlib.pyplot as plt
+from scipy.stats import linregress
+
+# Define years
+years = np.arange(2001, 2025)
+
+# Define markers for consistency across all 3 plots
+markers = ['o', 's', '^']  # Circle, Square, Triangle
+
+# Define text position in each plot
+text_x = 2002  # Position on x-axis
+text_y_positions = [77000, 28.5, 27.2]  # Different heights for each timeseries
+yticks = np.arange(10,30.1,5)
+
+# --- **Figure 1: Burned Area on Heatwave Days** ---
+plt.figure(figsize=(8, 6))
+
+# Compute trends
+trend_all, intercept_all, _, p_all, _ = linregress(years, burned_on_hw_all)
+trend_forest, intercept_forest, _, p_forest, _ = linregress(years, burned_on_hw_forest)
+trend_nonforest, intercept_nonforest, _, p_nonforest, _ = linregress(years, burned_on_hw_nonforest)
+
+# Plot time series with markers
+#plt.plot(years, annual_percent_all[0], 'k-', marker=markers[0], label="All WUS")
+plt.plot(years, burned_on_hw_forest, color="#228B22", linestyle='-', marker=markers[1], label="Forest")
+plt.plot(years, burned_on_hw_nonforest, color="#964B00", linestyle='-', marker=markers[2], label="Non-Forest")
+
+# Plot trendlines
+#plt.plot(years, trend_all * years + intercept_all, 'k--')
+plt.plot(years, trend_forest * years + intercept_forest, '--', color="#228B22")
+plt.plot(years, trend_nonforest * years + intercept_nonforest, '--', color="#964B00")
+
+# Paste trend values and p-values
+#plt.text(text_x, text_y_positions[0], f"trend = {trend_all:.2f}, p = {p_all:.3f}", fontsize=15, color="black")
+plt.text(text_x, text_y_positions[1], f"trend = {trend_forest:.2f}, p = {p_forest:.3f}", fontsize=20, color="#228B22")
+plt.text(text_x, text_y_positions[2], f"trend = {trend_nonforest:.2f}, p = {p_nonforest:.3f}", fontsize=20, color="#964B00")
+
+plt.ylabel("Percent", fontsize=20)
+#plt.xlabel("Year", fontsize=15)
+#plt.ylabel("Hectares/day", fontsize=20)
+#plt.title("RHmin during HW", fontsize=20)
+
+plt.xticks(fontsize=20)
+plt.yticks(yticks, fontsize=20)
+
+#plt.legend(fontsize=15, loc="upper right")  # **Legend only in the first figure**
+plt.show()
