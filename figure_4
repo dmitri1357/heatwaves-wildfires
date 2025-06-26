@@ -44,8 +44,8 @@ significance_results = {}
 # Get unique ecoregion identifiers
 ecoregion_ids = wus.ecoregion.values
 
-# note - in a later prompt, I change this code to compare BA on heatwave days to BA on 
-# days with <90th percentile Tmax 
+# note that for convenience I'm reusing the variable names from BA, but this is actually calculating ERC differences
+
 for period, mask in time_masks.items():
     if mask is not None:
         wus_subset = wus.sel(day=mask)
@@ -59,7 +59,7 @@ for period, mask in time_masks.items():
 
     # Process each ecoregion
     for ecoregion in ecoregion_ids:
-        ecoregion_burned_area = wus_subset.erc.sel(ecoregion=ecoregion) # swap variable here (BA for Tmax)
+        ecoregion_burned_area = wus_subset.erc.sel(ecoregion=ecoregion) # swap variable here (ERC instead of BA)
         ecoregion_tmax_percentile = wus_subset.tmax_percentile.sel(ecoregion=ecoregion)
 
         # Initialize lists to store yearly masks
