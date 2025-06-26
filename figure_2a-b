@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+
+import xarray as xr
+import geopandas as gpd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import linregress
+from tqdm import tqdm
+
+# Load datasets
+wus = xr.open_dataset('wus_ecoregion_data.nc')
+wus_ecoregions = gpd.read_file("wus_ecoregions.shp")
+
+# Get unique ecoregion identifiers
+ecoregion_ids = wus.ecoregion.values
+years = np.arange(2001, 2025)
+
+# Forest/Non-Forest classification (1 = forest, 0 = non-forest)
+forest_boolean_vector = np.array([1,1,1,1,1,1,0,1,1,0,1,0,0,0,1,1,1,0,1,0,1,0,1,1,1,1,1,0,0,1])
+
+# Initialize arrays to store cumulative values for aggregation
+total_burned_all = np.zeros(len(years))
+total_burned_forest = np.zeros(len(years))
+total_burned_nonforest = np.zeros(len(years))
+
+burned_on_hw_all = np.zeros(len(years))
+burned_on_hw_forest = np.zeros(len(years))
+burned_on_hw_nonforest = np.zeros(len(years))
+
+burned_after_hw_all = np.zeros(len(years))
+burned_after_hw_forest = np.zeros(len(years))
+burned_after_hw_nonforest = np.zeros(len(years))
+
+total_hw_days_all = np.zeros(len(years))
+total_hw_days_forest = np.zeros(len(years))
+total_hw_days_nonforest = np.zeros(len(years))
+
+total_after_hw_days_all = np.zeros(len(years))
+total_after_hw_days_forest = np.zeros(len(years))
+total_after_hw_days_nonforest = np.zeros(len(years))
+
+# on 4/9/2025, counting HW + after HW days by ecoregion
+hw_days_ecoregions = np.empty([30,24])
+
+# Process each ecoregion and accumulate the results
+for ecoregion_idx, ecoregion in tqdm(enumerate(ecoregion_ids), total=len(ecoregion_ids)):
+    ecoregion_burned_area = wus.burned_area.sel(ecoregion=ecoregion)
+    ecoregion_tmax_percentile = wus.tmax_percentile.sel(ecoregion=ecoregion)
+
+    # Initialize lists to store yearly masks and burned area data
+    annual_heatwave_masks = []
+    annual_days_after_masks = []
+
+    burned_on_hw_list = []
+    burned_after_hw_list = []
+    total_burned_list = []
+    total_hw_days_list = []
+    total_after_hw_days_list = []
+
+    # **Split the data into 24 separate years before processing**
+    for year_idx, year in enumerate(years):
+        # Select data for the current year
+        year_burned_area = ecoregion_burned_area.sel(day=ecoregion_burned_area.day.dt.year == year)
+        year_tmax_percentile = ecoregion_tmax_percentile.sel(day=ecoregion_tmax_percentile.day.dt.year == year)
+
+        # **Identify heatwave days (3+ consecutive days with tmax_percentile > 90)**
+        rolling_sum = (year_tmax_percentile > 90).rolling(day=3, center=False).sum()
+        heatwave_days = rolling_sum >= 3
+
+        # **Expand the heatwave mask to include all days within the heatwave period**
+        expanded_heatwave_mask = heatwave_days.copy()
+        for i in range(1, 3):  # Include up to 2 days before heatwave starts
+            expanded_heatwave_mask |= heatwave_days.shift(day=-i, fill_value=False)
+
+        # Identify the 5 days **after** a heatwave ends (ensuring no overlap with following heatwaves)
+        days_after = xr.full_like(expanded_heatwave_mask, False, dtype=bool)
+
+        for i in range(1, 6):  # Look forward 5 days
+            post_heatwave_day = expanded_heatwave_mask.shift(day=i, fill_value=False)  # Shift forward
+            days_after |= post_heatwave_day  # Combine across all 5 days
+         
+        # Ensure that no post-heatwave days overlap with following heatwaves
+        days_after &= ~expanded_heatwave_mask
+
+        # **Store the masks for yearly concatenation**
+        annual_heatwave_masks.append(expanded_heatwave_mask)
+        annual_days_after_masks.append(days_after)
+
+        # **Compute burned area for heatwave days and post-heatwave days**
+        burned_on_hw = year_burned_area.where(expanded_heatwave_mask).sum(dim="day").item()
+        burned_after_hw = year_burned_area.where(days_after).sum(dim="day").item()
+        total_burned = year_burned_area.sum(dim="day").item()
+        total_hw_days = expanded_heatwave_mask.sum(dim="day").item()
+        total_after_hw_days = days_after.sum(dim="day").item()
+
+        # Store yearly results
+        burned_on_hw_list.append(burned_on_hw)
+        burned_after_hw_list.append(burned_after_hw)
+        total_burned_list.append(total_burned)
+        total_hw_days_list.append(total_hw_days)
+        total_after_hw_days_list.append(total_after_hw_days)
+        
+        hw_days_ecoregions[ecoregion_idx, year_idx] = total_hw_days + total_after_hw_days
+
+    # **Convert stored lists into NumPy arrays**
+    burned_on_hw = np.array(burned_on_hw_list)
+    burned_after_hw = np.array(burned_after_hw_list)
+    total_burned = np.array(total_burned_list)
+    total_hw_days = np.array(total_hw_days_list)
+    total_after_hw_days = np.array(total_after_hw_days_list)
+
+    # **Aggregate results across all ecoregions**
+    total_burned_all += total_burned
+    burned_on_hw_all += burned_on_hw
+    burned_after_hw_all += burned_after_hw
+    total_hw_days_all += total_hw_days
+    total_after_hw_days_all += total_after_hw_days
+
+    # **Aggregate separately for forest and non-forest ecoregions**
+    if forest_boolean_vector[ecoregion_idx] == 1:  # Forest ecoregion
+        total_burned_forest += total_burned
+        burned_on_hw_forest += burned_on_hw
+        burned_after_hw_forest += burned_after_hw
+        total_hw_days_forest += total_hw_days
+        total_after_hw_days_forest += total_after_hw_days
+    else:  # Non-forest ecoregion
+        total_burned_nonforest += total_burned
+        burned_on_hw_nonforest += burned_on_hw
+        burned_after_hw_nonforest += burned_after_hw
+        total_hw_days_nonforest += total_hw_days
+        total_after_hw_days_nonforest += total_after_hw_days
+
+total_non_hw_days = 184 - total_hw_days_all/30 - total_after_hw_days_all/30
+total_non_hw_days_forest = 184 - total_hw_days_forest/20 - total_after_hw_days_forest/20
+total_non_hw_days_nonforest = 184 - total_hw_days_nonforest/10 - total_after_hw_days_nonforest/10
+total_days = np.repeat(184,24)
+
+import matplotlib.pyplot as plt
+from scipy.stats import linregress
+
+# Define years
+years = np.arange(2001, 2025)
+
+# Define markers for consistency across all 3 plots
+markers = ['o', 's', '^']  # Circle, Square, Triangle
+
+# Define text position in each plot
+text_x = 2002  # Position on x-axis
+
+# Fig 2a - annual HWall days
+
+plt.figure(figsize=(8, 6))
+
+text_y_positions = [77000, 38, 35.6]  # Different heights for each timeseries
+
+# Compute trends
+#trend_all, intercept_all, _, p_all, _ = linregress(years, burned_on_hw_all)
+trend_forest, intercept_forest, _, p_forest, _ = linregress(years, (total_hw_days_forest/20 + total_after_hw_days_forest/20))
+trend_nonforest, intercept_nonforest, _, p_nonforest, _ = linregress(years, (total_hw_days_nonforest/10 + total_after_hw_days_nonforest/10))
+
+# Plot time series with markers
+#plt.plot(years, annual_percent_all[0], 'k-', marker=markers[0], label="All WUS")
+plt.plot(years, (total_hw_days_forest/20 + total_after_hw_days_forest/20), color="#228B22", linestyle='-', marker=markers[1], label="Forest")
+plt.plot(years, (total_hw_days_nonforest/10 + total_after_hw_days_nonforest/10), color="#964B00", linestyle='-', marker=markers[2], label="Non-Forest")
+
+# Plot trendlines
+#plt.plot(years, trend_all * years + intercept_all, 'k--')
+plt.plot(years, trend_forest * years + intercept_forest, '--', color="#228B22")
+plt.plot(years, trend_nonforest * years + intercept_nonforest, '--', color="#964B00")
+
+# Paste trend values and p-values
+#plt.text(text_x, text_y_positions[0], f"trend = {trend_all:.2f}, p = {p_all:.3f}", fontsize=15, color="black")
+plt.text(text_x, text_y_positions[1], f"trend = {trend_forest:.2f}, p = {p_forest:.3f}", fontsize=15, color="#228B22")
+plt.text(text_x, text_y_positions[2], f"trend = {trend_nonforest:.2f}, p = {p_nonforest:.3f}", fontsize=15, color="#964B00")
+
+#plt.xlabel("Year", fontsize=15)
+plt.ylabel("Number of days", fontsize=20)
+#plt.title("(m) WUS-average number of HW + post-HW days per year", fontsize=20)
+
+plt.xticks(fontsize=20)
+plt.yticks(np.arange(0, 41, 10), fontsize=20)
+plt.ylim(-2,41)
+
+#plt.legend(fontsize=15, loc="upper right")  # **Legend only in the first figure**
+plt.show()
+
+# Fig. 2b
+
+import pandas as pd
+import matplotlib as mpl
+
+# Compute trends
+trends = np.empty(30)
+pvals = np.empty(30)
+for k in range(30):
+    hw_lengths = pd.DataFrame({'year':years,'hw':hw_days_ecoregions[k,:]})
+    hw_lengths = hw_lengths.dropna()
+    trend, intercept, _, pval, _ = linregress(np.array(hw_lengths.year), np.array(hw_lengths.hw))
+    trends[k] = trend
+    pvals[k] = pval
+
+trends = trends * 24
+
+import matplotlib.patches as mpatches
+
+# Define discrete colormap 
+cmap = plt.cm.get_cmap("RdBu_r", 24)  
+vmin, vmax = -30, 30 
+norm = mpl.colors.Normalize(vmin=vmin, vmax=vmax) # this is the same as plt.clim
+
+# Load the ecoregion shapefile
+wus_ecoregions = gpd.read_file("wus_ecoregions.shp")
+
+# Extract data for May-October only
+ratios = trends  # Change results variable here
+
+# Create figure
+fig, ax = plt.subplots(figsize=(8, 6), constrained_layout=True)
+
+# Copy the ecoregions dataset and add values
+ecoregions = wus_ecoregions.copy()
+ecoregions['burned_area_ratio'] = ratios
+ecoregions["is_significant"] = pvals  # Change sig_results variable here
+
+# Plot the burned area ratio with the custom colormap
+ecoregions.plot(column='burned_area_ratio', 
+                cmap=cmap, norm=norm, vmin=vmin, vmax=vmax,
+                ax=ax, legend=False,
+                missing_kwds={'color': '0.8', 'label': 'No Data'})
+
+# Overlay state and ecoregion boundaries
+states.boundary.plot(ax=ax, edgecolor='k', lw=1)
+wus_ecoregions.boundary.plot(ax=ax, edgecolor="black", linewidth=0.5)
+
+# Add hatching for significant ecoregions
+for _, row in ecoregions.iterrows():
+    if row["is_significant"] < 0.1:  # Check significance flag
+        if row.geometry.geom_type == "Polygon":
+            polygons = [row.geometry]
+        elif row.geometry.geom_type == "MultiPolygon":
+            polygons = row.geometry.geoms  # Extract individual polygons
+        else:
+            polygons = []
+
+        for poly in polygons:
+            patch = mpatches.Polygon(np.array(poly.exterior.coords),
+                                     facecolor="none", edgecolor="k",
+                                     hatch="..", linewidth=1, zorder=100)
+            ax.add_patch(patch)
+
+# Set title
+ax.set_title("Burned Area Ratio (May-Oct)", fontsize=12)
+ax.set_axis_off()
+
+# Add a single horizontal colorbar beneath the maps
+cbar = fig.colorbar(
+    mpl.cm.ScalarMappable(cmap=cmap, norm=norm),
+    ax=ax,
+    orientation='vertical',
+    #extend='max',
+    fraction=0.025,  # control the length
+    pad=0.05,             # Keep the colorbar close to the maps
+    #aspect=35,           # control the width
+    ticks=np.arange(-30, 30.1, 5)  # Ticks every 1 unit
+)
+
+# Set the font size for colorbar ticks
+cbar.ax.tick_params(labelsize=12)  # change size between 20 and 30 depending on orientation
