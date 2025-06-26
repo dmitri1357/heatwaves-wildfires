@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+
+import xarray as xr
+import geopandas as gpd
+import rioxarray
+
+# sum daily MODIS burned area by ecoregion
+
+ba = xr.open_dataset('gridcell_ba_all.nc') # processed dataset of burned areas in sq. km. 
+# subset to warm season (May-October)
+ba = ba.sel(time=ba['time'].dt.month.isin([5,6,7,8,9,10]))
+gdf = gpd.read_file("wus_ecoregions.shp") 
+
+ba = ba.rio.write_crs("EPSG:4326")
+
+# need to rename lat,lon to y,x for rioxarray operation
+ba = ba.rename({"lat": "y"})
+ba = ba.rename({"lon": "x"})
+
+# Create an empty list to store daily sums for each ecoregion
+ecoregion_ba_sums = []
+
+# Loop through each feature in the GeoDataFrame (each ecoregion)
+# this takes about 2 minutes to execute
+for _, region in gdf.iterrows():
+    # Mask the data to this ecoregion
+    masked_ba = ba.rio.clip([region['geometry']], all_touched=True, drop=True)
+
+    # Sum burned area within this ecoregion for each day
+    daily_ba_sum = masked_ba.sum(dim=['y', 'x'], skipna=True)
+    
+    # Add the results to our list as a new DataArray for this ecoregion
+    ecoregion_ba_sums.append(daily_ba_sum)
+
+# Combine all daily sums into a single xarray DataArray with a new dimension for ecoregion
+result = xr.concat(ecoregion_ba_sums, dim="ecoregion")
+
+# Add the ecoregion names or IDs as a coordinate
+result = result.assign_coords(ecoregion=("ecoregion", gdf['US_L3CODE'].values))
+
+result.to_netcdf('ba_ecoregions.nc')
