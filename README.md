@@ -1,0 +1,1 @@
+This is the codebase for the study into heatwave-wildfire linkages in the western U.S. The accompanying dataset that contains all fire, meteorological, and fuel moisture data aggregated to ecoregions can be found at the following Zenodo repository: https://doi.org/10.5281/zenodo.15748738
