@@ -1,0 +1,426 @@
+#!/usr/bin/env python3
+
+'''
+Note - this code shows just the ERC differences.
+The code to calculate differences of other variables is the same with only the variable names swapped, and is not shown here.
+'''
+
+# Fig 4a - ERC difference between HW and pre-HW periods
+# note - this code calculates ERC differences for the full warm season plus May-June, July-Aug, and Sep-Oct separately
+# for the paper, I'm only using the aggregate warm season differences
+
+import xarray as xr
+import geopandas as gpd
+import matplotlib.pyplot as plt
+import numpy as np
+from scipy.stats import ks_2samp
+import matplotlib.patches as mpatches
+
+wus = xr.open_dataset('wus_ecoregion_data.nc')
+
+# Load the state boundaries
+states = gpd.read_file('cb_2018_us_state_5m.shp')
+states = states.to_crs("EPSG:4326")
+states = states[states.NAME.isin(['Washington', 'Oregon', 'Idaho', 'Montana',
+                                  'California', 'Nevada', 'Utah', 'Wyoming',
+                                  'Colorado', 'Arizona', 'New Mexico'])]
+
+# Load the ecoregion shapefile
+wus_ecoregions = gpd.read_file("wus_ecoregions.shp")
+
+# Define overall and bi-monthly periods
+time_masks = {
+    "Warm Season (May-Oct)": None,  # Full time period
+    "May-June": (wus.day.dt.month.isin([5, 6])),
+    "July-August": (wus.day.dt.month.isin([7, 8])),
+    "Sept-Oct": (wus.day.dt.month.isin([9, 10]))
+}
+
+# Initialize a dictionary to store results for each period
+results = {}
+results_actual_values = {}
+significance_results = {}
+
+# Get unique ecoregion identifiers
+ecoregion_ids = wus.ecoregion.values
+
+# note - in a later prompt, I change this code to compare BA on heatwave days to BA on 
+# days with <90th percentile Tmax 
+for period, mask in time_masks.items():
+    if mask is not None:
+        wus_subset = wus.sel(day=mask)
+    else:
+        wus_subset = wus
+
+    # Initialize an array to store the burned area ratio for each ecoregion
+    burned_area_ratio = xr.full_like(wus_subset.burned_area.mean(dim='day'), np.nan)
+    burned_area_actual = xr.full_like(wus_subset.burned_area.mean(dim='day'), np.nan)
+    significance_flags = []
+
+    # Process each ecoregion
+    for ecoregion in ecoregion_ids:
+        ecoregion_burned_area = wus_subset.erc.sel(ecoregion=ecoregion) # swap variable here (BA for Tmax)
+        ecoregion_tmax_percentile = wus_subset.tmax_percentile.sel(ecoregion=ecoregion)
+
+        # Initialize lists to store yearly masks
+        annual_expanded_heatwave_masks = []
+        annual_below_90_masks = []
+
+        # Split data into 24 years for processing
+        for year in np.arange(2001, 2025):
+            # Select data for the current year
+            year_burned_area = ecoregion_burned_area.sel(day=ecoregion_burned_area.day.dt.year == year)
+            year_tmax_percentile = ecoregion_tmax_percentile.sel(day=ecoregion_tmax_percentile.day.dt.year == year)
+
+            # Identify heatwave days (3+ consecutive days with tmax_percentile > 90)
+            rolling_sum = (year_tmax_percentile > 90).rolling(day=3, center=False).sum()
+            heatwave_days = rolling_sum >= 3
+
+            # Expand the heatwave mask to include all days within the heatwave period
+            expanded_heatwave_mask = heatwave_days.copy()
+            for i in range(1, 3):  # Backfill exactly 2 days before a heatwave starts
+                expanded_heatwave_mask |= heatwave_days.shift(day=-i, fill_value=False)
+
+            # Identify the 3 days **before** a heatwave starts (ensuring no overlap with previous heatwaves)
+            pre_heatwave_mask = xr.full_like(expanded_heatwave_mask, False, dtype=bool)
+
+            for i in range(1, 6):  # Look back 5 days
+                pre_heatwave_day = expanded_heatwave_mask.shift(day=-i, fill_value=False)  # Shift backward
+                pre_heatwave_mask |= pre_heatwave_day  # Combine across all 5 days
+            
+            # Ensure that no pre-heatwave days overlap with earlier heatwaves
+            pre_heatwave_mask &= ~expanded_heatwave_mask
+
+            # Append the yearly masks to the lists
+            annual_expanded_heatwave_masks.append(expanded_heatwave_mask)
+            annual_below_90_masks.append(pre_heatwave_mask)
+
+        # Concatenate the yearly masks into single masks spanning the full 24-year period
+        expanded_heatwave_mask = xr.concat(annual_expanded_heatwave_masks, dim="day")
+        below_90_mask = xr.concat(annual_below_90_masks, dim="day")
+
+        # Proceed with the original analysis over the full 24 years
+        if expanded_heatwave_mask.sum() >= 1 and below_90_mask.sum() >= 1: # handle instances when no heatwave days were observed
+            burned_area_heatwave = ecoregion_burned_area.where(expanded_heatwave_mask, drop=True)
+            burned_area_below_90 = ecoregion_burned_area.where(below_90_mask, drop=True)
+
+        # Calculate average burned area for heatwave days and below-90 days
+        avg_burned_heatwave = burned_area_heatwave.mean(dim='day', skipna=True)
+        avg_burned_below_90 = burned_area_below_90.mean(dim='day', skipna=True)
+
+        # Calculate Tmax diff between HWD and non-HWD
+        if np.sum(expanded_heatwave_mask.values) >= 20:
+            burned_area_ratio.loc[ecoregion] = avg_burned_heatwave - avg_burned_below_90
+            burned_area_actual.loc[ecoregion] = avg_burned_heatwave
+            
+        # Perform K-S test for significance
+        heatwave_values = burned_area_heatwave.values[~np.isnan(burned_area_heatwave.values)]
+        below_90_values = burned_area_below_90.values[~np.isnan(burned_area_below_90.values)]
+
+        if len(heatwave_values) > 0 and avg_burned_below_90 > 0 and len(below_90_values) > 0 and np.sum(expanded_heatwave_mask.values) >= 20:
+            _, p_value = ks_2samp(heatwave_values, below_90_values)
+            significance_flags.append(p_value < 0.1)  # True if significant
+        else:
+            significance_flags.append(False)
+
+    # Store the results for this period
+    results[period] = burned_area_ratio
+    results_actual_values[period] = burned_area_actual
+    significance_results[period] = significance_flags
+
+import matplotlib as mpl
+from matplotlib.colors import ListedColormap
+
+# get max and min values 
+max_value = max(da.max().item() for da in results.values())
+print(max_value)
+min_value = min(da.min().item() for da in results.values())
+print(min_value)
+
+# Define discrete colormap 
+cmap = plt.cm.get_cmap("RdBu_r", 20)  
+vmin, vmax = -10, 10
+norm = mpl.colors.Normalize(vmin=vmin, vmax=vmax) # this is the same as plt.clim
+
+# Plot the results
+fig, axes = plt.subplots(1, 4, figsize=(24, 6), constrained_layout=True)
+
+for ax, (period, ratios) in zip(axes, results.items()):
+    ecoregions = wus_ecoregions.copy()
+    ecoregions['burned_area_ratio'] = ratios.values
+    ecoregions["is_significant"] = significance_results[period]
+
+    ecoregions.plot(column='burned_area_ratio', 
+                    vmin = vmin, vmax = vmax,
+                    ax=ax, cmap=cmap, legend=False,
+                    missing_kwds={'color': '0.8', 'label': 'No Data'})
+
+    states.boundary.plot(ax=ax, edgecolor='k', lw=1)
+    wus_ecoregions.boundary.plot(ax=ax, edgecolor="black", linewidth=0.5)
+    
+    # extract the plotted color for the Central Valley (#7) for overplotting on map
+    value = ecoregions.loc[ecoregions["US_L3CODE"] == 7, "burned_area_ratio"].values[0]
+
+    # Get the normalized value
+    normalized_value = norm(value)
+
+    # Extract the RGB color from the ListedColormap
+    rgb_color = cmap(normalized_value) if ~np.isnan(value) else "0.8"
+    
+    # Add hatching for significant ecoregions
+    for _, row in ecoregions.iterrows():
+        if row["is_significant"]:  # Check significance flag
+            if row.geometry.geom_type == "Polygon":
+                polygons = [row.geometry]
+            elif row.geometry.geom_type == "MultiPolygon":
+                polygons = row.geometry.geoms  # Extract individual polygons
+            else:
+                polygons = []
+
+            for poly in polygons:
+                patch = mpatches.Polygon(np.array(poly.exterior.coords),
+                                         facecolor="none", edgecolor="k",
+                                         hatch="..", linewidth=1, zorder=100)
+                ax.add_patch(patch)
+        # handle the weird situation where the Central Valley (#7) gets overplotted by ecoregion #6 hatching
+        elif row['L3_KEY'] == '7  Central California Valley' and row['is_significant'] == False and ecoregions.loc[5]['is_significant'] == True:
+            polygons = [row.geometry]
+            for poly in polygons:
+                patch = mpatches.Polygon(np.array(poly.exterior.coords),
+                                          facecolor=rgb_color, edgecolor="k",
+                                          hatch="", linewidth=1, zorder=101)
+                ax.add_patch(patch)
+
+    ax.set_title(period)
+    ax.set_axis_off()
+
+# Add a single horizontal colorbar beneath the maps
+cbar = fig.colorbar(
+    mpl.cm.ScalarMappable(cmap=cmap, norm=norm),
+    ax=axes,
+    orientation='horizontal',
+    extend='max',
+    fraction=0.025,  # control the length
+    pad=0.05,             # Keep the colorbar close to the maps
+    aspect=50,           # control the width
+    ticks=np.arange(-10, 10.1, 2)  # Ticks every 1 unit
+)
+
+#cbar.set_label("Burned Area Ratio")
+
+#plt.suptitle("BA ratio during heatwaves vs. non-heatwave days")
+plt.show()
+
+# Fig. 4d - ERC post-HW
+
+import xarray as xr
+import geopandas as gpd
+import matplotlib.pyplot as plt
+import numpy as np
+from scipy.stats import ks_2samp
+import matplotlib.patches as mpatches
+
+wus = xr.open_dataset('wus_ecoregion_data.nc')
+
+# Load the state boundaries
+states = gpd.read_file('cb_2018_us_state_5m.shp')
+states = states.to_crs("EPSG:4326")
+states = states[states.NAME.isin(['Washington', 'Oregon', 'Idaho', 'Montana',
+                                  'California', 'Nevada', 'Utah', 'Wyoming',
+                                  'Colorado', 'Arizona', 'New Mexico'])]
+
+# Load the ecoregion shapefile
+wus_ecoregions = gpd.read_file("wus_ecoregions.shp")
+
+# Define overall and bi-monthly periods
+time_masks = {
+    "Warm Season (May-Oct)": None,  # Full time period
+    "May-June": (wus.day.dt.month.isin([5, 6])),
+    "July-August": (wus.day.dt.month.isin([7, 8])),
+    "Sept-Oct": (wus.day.dt.month.isin([9, 10]))
+}
+
+# Initialize a dictionary to store results for each period
+results = {}
+results_actual_values = {}
+significance_results = {}
+
+# Get unique ecoregion identifiers
+ecoregion_ids = wus.ecoregion.values
+
+# note - in a later prompt, I change this code to compare BA on heatwave days to BA on 
+# days with <90th percentile Tmax 
+for period, mask in time_masks.items():
+    if mask is not None:
+        wus_subset = wus.sel(day=mask)
+    else:
+        wus_subset = wus
+
+    # Initialize an array to store the burned area ratio for each ecoregion
+    burned_area_ratio = xr.full_like(wus_subset.burned_area.mean(dim='day'), np.nan)
+    burned_area_actual = xr.full_like(wus_subset.burned_area.mean(dim='day'), np.nan)
+    significance_flags = []
+
+    # Process each ecoregion
+    for ecoregion in ecoregion_ids:
+        ecoregion_burned_area = wus_subset.erc.sel(ecoregion=ecoregion) # swap variable here (BA for Tmax)
+        ecoregion_tmax_percentile = wus_subset.tmax_percentile.sel(ecoregion=ecoregion)
+
+        # Initialize lists to store yearly masks
+        annual_expanded_heatwave_masks = []
+        annual_below_90_masks = []
+
+        # Split data into 24 years for processing
+        for year in np.arange(2001, 2025):
+            # Select data for the current year
+            year_burned_area = ecoregion_burned_area.sel(day=ecoregion_burned_area.day.dt.year == year)
+            year_tmax_percentile = ecoregion_tmax_percentile.sel(day=ecoregion_tmax_percentile.day.dt.year == year)
+
+            # Identify heatwave days (3+ consecutive days with tmax_percentile > 90)
+            rolling_sum = (year_tmax_percentile > 90).rolling(day=3, center=False).sum()
+            heatwave_days = rolling_sum >= 3
+
+            # Expand the heatwave mask to include all days within the heatwave period
+            expanded_heatwave_mask = heatwave_days.copy()
+            for i in range(1, 3):  # Backfill exactly 2 days before a heatwave starts
+                expanded_heatwave_mask |= heatwave_days.shift(day=-i, fill_value=False)
+
+            # Identify the 3 days **before** a heatwave starts (ensuring no overlap with previous heatwaves)
+            pre_heatwave_mask = xr.full_like(expanded_heatwave_mask, False, dtype=bool)
+
+            for i in range(1, 6):  # Look back 5 days
+                pre_heatwave_day = expanded_heatwave_mask.shift(day=-i, fill_value=False)  # Shift backward
+                pre_heatwave_mask |= pre_heatwave_day  # Combine across all 5 days
+            
+            # Ensure that no pre-heatwave days overlap with earlier heatwaves
+            pre_heatwave_mask &= ~expanded_heatwave_mask
+            
+            # Identify the 5 days **after** a heatwave ends (ensuring no overlap with following heatwaves)
+            days_after = xr.full_like(expanded_heatwave_mask, False, dtype=bool)
+
+            for i in range(1, 6):  # Look forward 5 days
+                post_heatwave_day = expanded_heatwave_mask.shift(day=i, fill_value=False)  # Shift forward
+                days_after |= post_heatwave_day  # Combine across all 5 days
+             
+            # Ensure that no post-heatwave days overlap with following heatwaves
+            days_after &= ~expanded_heatwave_mask
+
+            # Append the yearly masks to the lists
+            annual_expanded_heatwave_masks.append(days_after) # swap for days_after here
+            annual_below_90_masks.append(pre_heatwave_mask)
+
+        # Concatenate the yearly masks into single masks spanning the full 24-year period
+        expanded_heatwave_mask = xr.concat(annual_expanded_heatwave_masks, dim="day")
+        below_90_mask = xr.concat(annual_below_90_masks, dim="day")
+
+        # Proceed with the original analysis over the full 24 years
+        if expanded_heatwave_mask.sum() >= 1 and below_90_mask.sum() >= 1: # handle instances when no heatwave days were observed
+            burned_area_heatwave = ecoregion_burned_area.where(expanded_heatwave_mask, drop=True)
+            burned_area_below_90 = ecoregion_burned_area.where(below_90_mask, drop=True)
+
+        # Calculate average burned area for heatwave days and below-90 days
+        avg_burned_heatwave = burned_area_heatwave.mean(dim='day', skipna=True)
+        avg_burned_below_90 = burned_area_below_90.mean(dim='day', skipna=True)
+
+        # Calculate Tmax diff between HWD and non-HWD
+        if np.sum(expanded_heatwave_mask.values) >= 20:
+            burned_area_ratio.loc[ecoregion] = avg_burned_heatwave - avg_burned_below_90
+            burned_area_actual.loc[ecoregion] = avg_burned_heatwave
+            
+        # Perform K-S test for significance
+        heatwave_values = burned_area_heatwave.values[~np.isnan(burned_area_heatwave.values)]
+        below_90_values = burned_area_below_90.values[~np.isnan(burned_area_below_90.values)]
+
+        if len(heatwave_values) > 0 and avg_burned_below_90 > 0 and len(below_90_values) > 0 and np.sum(expanded_heatwave_mask.values) >= 20:
+            _, p_value = ks_2samp(heatwave_values, below_90_values)
+            significance_flags.append(p_value < 0.1)  # True if significant
+        else:
+            significance_flags.append(False)
+
+    # Store the results for this period
+    results[period] = burned_area_ratio
+    results_actual_values[period] = burned_area_actual
+    significance_results[period] = significance_flags
+
+import matplotlib as mpl
+from matplotlib.colors import ListedColormap
+
+# get max and min values 
+max_value = max(da.max().item() for da in results.values())
+print(max_value)
+min_value = min(da.min().item() for da in results.values())
+print(min_value)
+
+# Define discrete colormap 
+cmap = plt.cm.get_cmap("RdBu_r", 20)  
+vmin, vmax = -10, 10
+norm = mpl.colors.Normalize(vmin=vmin, vmax=vmax) # this is the same as plt.clim
+
+# Plot the results
+fig, axes = plt.subplots(1, 4, figsize=(24, 6), constrained_layout=True)
+
+for ax, (period, ratios) in zip(axes, results.items()):
+    ecoregions = wus_ecoregions.copy()
+    ecoregions['burned_area_ratio'] = ratios.values
+    ecoregions["is_significant"] = significance_results[period]
+
+    ecoregions.plot(column='burned_area_ratio', 
+                    vmin = vmin, vmax = vmax,
+                    ax=ax, cmap=cmap, legend=False,
+                    missing_kwds={'color': '0.8', 'label': 'No Data'})
+
+    states.boundary.plot(ax=ax, edgecolor='k', lw=1)
+    wus_ecoregions.boundary.plot(ax=ax, edgecolor="black", linewidth=0.5)
+    
+    # extract the plotted color for the Central Valley (#7) for overplotting on map
+    value = ecoregions.loc[ecoregions["US_L3CODE"] == 7, "burned_area_ratio"].values[0]
+
+    # Get the normalized value
+    normalized_value = norm(value)
+
+    # Extract the RGB color from the ListedColormap
+    rgb_color = cmap(normalized_value) if ~np.isnan(value) else "0.8"
+    
+    # Add hatching for significant ecoregions
+    for _, row in ecoregions.iterrows():
+        if row["is_significant"]:  # Check significance flag
+            if row.geometry.geom_type == "Polygon":
+                polygons = [row.geometry]
+            elif row.geometry.geom_type == "MultiPolygon":
+                polygons = row.geometry.geoms  # Extract individual polygons
+            else:
+                polygons = []
+
+            for poly in polygons:
+                patch = mpatches.Polygon(np.array(poly.exterior.coords),
+                                         facecolor="none", edgecolor="k",
+                                         hatch="..", linewidth=1, zorder=100)
+                ax.add_patch(patch)
+        # handle the weird situation where the Central Valley (#7) gets overplotted by ecoregion #6 hatching
+        elif row['L3_KEY'] == '7  Central California Valley' and row['is_significant'] == False and ecoregions.loc[5]['is_significant'] == True:
+            polygons = [row.geometry]
+            for poly in polygons:
+                patch = mpatches.Polygon(np.array(poly.exterior.coords),
+                                          facecolor=rgb_color, edgecolor="k",
+                                          hatch="", linewidth=1, zorder=101)
+                ax.add_patch(patch)
+
+    ax.set_title(period)
+    ax.set_axis_off()
+
+# Add a single horizontal colorbar beneath the maps
+cbar = fig.colorbar(
+    mpl.cm.ScalarMappable(cmap=cmap, norm=norm),
+    ax=axes,
+    orientation='horizontal',
+    extend='max',
+    fraction=0.025,  # control the length
+    pad=0.05,             # Keep the colorbar close to the maps
+    aspect=50,           # control the width
+    ticks=np.arange(-10, 10.1, 2)  # Ticks every 1 unit
+)
+
+#cbar.set_label("Burned Area Ratio")
+
+#plt.suptitle("BA ratio during heatwaves vs. non-heatwave days")
+plt.show()
