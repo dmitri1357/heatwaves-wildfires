@@ -356,8 +356,6 @@ plt.show()
 
 # plot <25th percentile heatwaves 
 
-# repeat the above plotting with new bins and non-linear colorbar
-
 import matplotlib as mpl
 from matplotlib.colors import ListedColormap, BoundaryNorm
 
@@ -480,8 +478,6 @@ blah = pd.DataFrame({'eco':names,'val':vals})
 # Fig. 5d - dry HW ratios
 
 # plot >75th percentile heatwaves 
-
-# repeat the above plotting with new bins and non-linear colorbar
 
 import matplotlib as mpl
 from matplotlib.colors import ListedColormap, BoundaryNorm
