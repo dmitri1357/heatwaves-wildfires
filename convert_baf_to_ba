@@ -6,7 +6,7 @@ import numpy as np
 
 ds = xr.open_dataset('MODIS_ba_gridMET_2001.nc',decode_times=False)
 
-# all 22 annual MODIS burned fraction files in this directory
+# all 24 annual MODIS burned fraction files in this directory
 import os
 
 all_files = os.listdir()
@@ -17,13 +17,13 @@ for file in all_files:
 
 files.sort()
 
-# ingest and combine all 22 annual files
+# ingest and combine all 24 annual files
 ds = xr.open_mfdataset(files, concat_dim='time', decode_times=False, combine='nested')
 
 # Flip the 'lat' dimension upside down
 ds_flipped = ds.isel(lat=slice(None, None, -1))
 
-dates = pd.date_range(start='1/1/2001', end='12/31/2022')
+dates = pd.date_range(start='1/1/2001', end='12/31/2024')
 dates = dates[~((dates.month == 2) & (dates.day == 29))]
 
 ds_flipped = ds_flipped.assign_coords(time=dates)
