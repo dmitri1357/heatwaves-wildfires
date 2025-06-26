@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+
+# Fig. 2c - forest
+
+import numpy as np
+
+total_burned_forest = np.load('total_burned_forest.npy') # from further above
+hw_days_per_year = np.load('hw_and_postHW_days_per_year.npy') # from panel M further above (this is for forest)
+
+# detrend HWall days
+import numpy as np
+from scipy.stats import linregress
+
+# Create time vector (e.g., 0 to 23 for 24 years)
+x = np.arange(len(hw_days_per_year))
+
+# Fit linear trend
+slope, intercept, _, _, _ = linregress(x, hw_days_per_year)
+
+# Compute trend relative to 2001 (x=0)
+trend_relative = slope * (x - x[0])  # This ensures value at 2001 is zero
+# Subtract trend but keep 2001 value fixed
+hwall_detrended = hw_days_per_year - trend_relative
+
+# Simple OLS - just using HWD to predict log(BA)
+
+# log-transform BA
+total_burned_forest = np.log10(total_burned_forest)
+
+years = np.arange(2001,2025) # still need to define years for plotting
+
+import numpy as np
+import pandas as pd
+import statsmodels.api as sm
+
+# Create DataFrame for modeling
+df = pd.DataFrame({
+    "burned_area": total_burned_forest,
+    "heatwave_days": hw_days_per_year
+})
+
+# Define independent variables (with intercept)
+X = df[["heatwave_days"]] # removed ERC
+X = sm.add_constant(X)  # Adds the intercept term
+
+# Dependent variable
+y = df["burned_area"]
+
+# Fit the linear model
+model = sm.OLS(y, X).fit()
+
+# Display the summary
+print(model.summary())
+
+base_hw_days = hwall_detrended
+
+# SCENARIO 1: Constant HW days, real ERC
+X_fixed_hw = pd.DataFrame({
+    "const": 1,
+    "heatwave_days": base_hw_days,})
+ba_pred_fixed_hw = model.predict(X_fixed_hw)
+
+# transform back
+ba_pred_fixed_hw = 10**ba_pred_fixed_hw
+
+# full model
+X_full = pd.DataFrame({
+    "const": 1,
+    "heatwave_days": hw_days_per_year,
+})
+ba_pred_full = model.predict(X_full)
+
+# transform back
+ba_pred_full = 10**ba_pred_full
+
+import matplotlib.pyplot as plt
+
+plt.figure(figsize=(8,6))
+plt.bar(years, 10**total_burned_forest, color="0.8", edgecolor="black", label="observed BA")
+plt.plot(years, ba_pred_full, label=r"pred(actual HW$_{\mathrm{all}}$)", linestyle="-", color="tab:red")
+plt.plot(years, ba_pred_fixed_hw, label=r"pred(counterfactual HW$_{\mathrm{all}}$)", linestyle="-", color="blue")
+plt.ylabel("Hectares", size=20)
+#plt.title("Counterfactual BA scenarios", size=20)
+plt.xticks(fontsize=20)
+plt.yticks(np.arange(0,3.01e6,0.5e6),fontsize=20)
+plt.legend(fontsize=20)
+plt.ylim(top=3e6)
+plt.tight_layout()
+plt.show()
+
+full_pred_sum = np.sum(ba_pred_full)
+hwd_detrend_sum = np.sum(ba_pred_fixed_hw)
+hwd_detrend_sum / full_pred_sum
+
+# Fig. 2d - repeating the above for non-forest
+
+total_burned_nonforest = np.load('total_burned_nonforest.npy') # from further above
+hw_days_per_year = np.load('hw_and_postHW_days_per_year_nonforest.npy') # from panel M further above (this is for forest)
+
+# detrend HWall days
+import numpy as np
+from scipy.stats import linregress
+
+# Create time vector (e.g., 0 to 23 for 24 years)
+x = np.arange(len(hw_days_per_year))
+
+# Fit linear trend
+slope, intercept, _, _, _ = linregress(x, hw_days_per_year)
+
+# Compute trend relative to 2001 (x=0)
+trend_relative = slope * (x - x[0])  # This ensures value at 2001 is zero
+
+# Subtract trend but keep 2001 value fixed
+hwall_detrended = hw_days_per_year - trend_relative
+
+# Simple OLS - just using HWD to predict log(BA)
+
+# log-transform BA
+total_burned_nonforest = np.log10(total_burned_nonforest)
+
+years = np.arange(2001,2025) # still need to define years for plotting
+
+import numpy as np
+import pandas as pd
+import statsmodels.api as sm
+
+# Create DataFrame for modeling
+df = pd.DataFrame({
+    "burned_area": total_burned_nonforest,
+    "heatwave_days": hw_days_per_year
+})
+
+# Define independent variables (with intercept)
+X = df[["heatwave_days"]] # removed ERC
+X = sm.add_constant(X)  # Adds the intercept term
+
+# Dependent variable
+y = df["burned_area"]
+
+# Fit the linear model
+model = sm.OLS(y, X).fit()
+
+# Display the summary
+print(model.summary())
+
+base_hw_days = hwall_detrended
+
+# SCENARIO 1: Constant HW days, real ERC
+X_fixed_hw = pd.DataFrame({
+    "const": 1,
+    "heatwave_days": base_hw_days,})
+ba_pred_fixed_hw = model.predict(X_fixed_hw)
+
+# transform back
+ba_pred_fixed_hw = 10**ba_pred_fixed_hw
+
+# full model
+X_full = pd.DataFrame({
+    "const": 1,
+    "heatwave_days": hw_days_per_year,
+})
+ba_pred_full = model.predict(X_full)
+
+# transform back
+ba_pred_full = 10**ba_pred_full
+
+import matplotlib.pyplot as plt
+
+plt.figure(figsize=(8,6))
+plt.bar(years, 10**total_burned_nonforest, color="0.8", edgecolor="black", label="observed BA")
+plt.plot(years, ba_pred_full, label=r"pred(actual HW$_{\mathrm{all}}$)", linestyle="-", color="tab:red")
+plt.plot(years, ba_pred_fixed_hw, label=r"pred(counterfactual HW$_{\mathrm{all}}$)", linestyle="-", color="blue")
+plt.ylabel("Hectares", size=20)
+#plt.title("Counterfactual BA scenarios", size=20)
+plt.xticks(fontsize=20)
+plt.yticks(np.arange(0,3.01e6,0.5e6),fontsize=20)
+#plt.legend(fontsize=15)
+plt.ylim(top=3e6)
+plt.tight_layout()
+plt.show()
+
+full_pred_sum = np.sum(ba_pred_full)
+hwd_detrend_sum = np.sum(ba_pred_fixed_hw)
+hwd_detrend_sum / full_pred_sum
