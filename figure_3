@@ -568,8 +568,8 @@ for ecoregion_idx, ecoregion in tqdm(enumerate(ecoregion_ids), total=len(ecoregi
             expanded_heatwave_mask |= heatwave_days.shift(day=-i, fill_value=False)
 
         # Identify the first day of each heatwave
-        # changed this to only consider heatwave starts if none of the prior 3 days were HWD
-        heatwave_starts = expanded_heatwave_mask & ~expanded_heatwave_mask.shift(day=1, fill_value=False) & ~expanded_heatwave_mask.shift(day=2, fill_value=False) & ~expanded_heatwave_mask.shift(day=3, fill_value=False)
+        # changed this to only consider heatwave starts if none of the prior 5 days were HWD
+        heatwave_starts = expanded_heatwave_mask & ~expanded_heatwave_mask.shift(day=1, fill_value=False) & ~expanded_heatwave_mask.shift(day=2, fill_value=False) & ~expanded_heatwave_mask.shift(day=3, fill_value=False) & ~expanded_heatwave_mask.shift(day=4, fill_value=False) & ~expanded_heatwave_mask.shift(day=5, fill_value=False)
         
         # Loop through heatwave start dates
         for start_day in year_burned_area.day[heatwave_starts]:
@@ -579,8 +579,7 @@ for ecoregion_idx, ecoregion in tqdm(enumerate(ecoregion_ids), total=len(ecoregi
             if start_idx < 5 or start_idx + 14 >= len(year_burned_area):
                 continue  # Skip if not enough days before/after
 
-            # Extract 15-day period (7 days before start, lag 0, 7 days after start)
-            # change to 3 days before start, and 10 days after start
+            # extract window - these are actually 20 day periods now, not 15 days but I kept the old variable name
             period_burned_area = year_burned_area[start_idx - 5 : start_idx + 15].values
             all_15_day_periods.append(period_burned_area)
         
