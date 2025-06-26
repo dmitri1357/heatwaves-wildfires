@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+
+# combine 19 variables into single dataset of dimensions (30 ecoregions, 4416 days)
+# and containing the 19 variables
+# 4416 days corresponds to the number of days between May-October, 2001-2024
+
+import xarray as xr
+
+# first, rename the 'time' dimension in ba_ecoregions to 'day' to match the other datasets
+ba = xr.open_dataset('ba_ecoregions.nc') 
+ba = ba.rename({"time": "day"})
+ba.to_netcdf('ba_ecoregions.nc')
+
+# List of filenames
+filenames = [
+    "ba_ecoregions.nc", "tmax_ecoregions.nc", "tmax_ecoregions_perc.nc", 
+    "tmin_ecoregions.nc", "tmin_ecoregions_perc.nc", "tmean_ecoregions.nc", 
+    "tmean_ecoregions_perc.nc", "vpd_ecoregions.nc", "vpd_ecoregions_perc.nc", 
+    "erc_ecoregions.nc", "erc_ecoregions_perc.nc", "rmin_ecoregions.nc", 
+    "spei30d_ecoregions.nc", "spei90d_ecoregions.nc", "spei180d_ecoregions.nc", 
+    "spei270d_ecoregions.nc", "spei1y_ecoregions.nc", "fm100_ecoregions.nc", 
+    "fm1000_ecoregions.nc"
+]
+
+# List of variable names to assign to each data array
+variable_names = [
+    "burned_area", "tmax", "tmax_percentile", "tmin", "tmin_percentile",
+    "tmean", "tmean_percentile", "vpd", "vpd_percentile", "erc",
+    "erc_percentile", "minimum_rh", "spei_30d", "spei_90d",
+    "spei_180d", "spei_270d", "spei_1year", "fm100", "fm1000"
+]
+
+# Corresponding units for each variable
+units = [
+    "sq. km.", "deg C", "percentile", "deg C", "percentile",
+    "deg C", "percentile", "hPa", "percentile", "unitless",
+    "percentile", "percent", "unitless", "unitless",
+    "unitless", "unitless", "unitless", "percent", "percent"
+]
+
+# Open each file, assign the variable name, and add units
+# Create a dictionary to hold individual DataArrays
+data_arrays = {}
+for i, file in enumerate(filenames):
+    da = xr.open_dataset(file).squeeze() # Open file and remove any extra dimensions
+    var_name = variable_names[i]
+    da = da.rename({list(da.data_vars)[0]: var_name}) # Rename the variable
+    da[var_name].attrs['units'] = units[i] # Assign units
+    data_arrays[var_name] = da[var_name]  # Store in dictionary with the new variable name
+
+# Combine all DataArrays into a single Dataset with each variable as a separate entry
+ds_combined = xr.Dataset(data_arrays)
+
+# Convert all variables in ds_combined to float32 (some are currently float64)
+ds_combined = ds_combined.astype("float32")
+
+# check variable names
+ds_combined.data_vars
+
+# check units
+for var in ds_combined.data_vars:
+    print(f"{var} units:", ds_combined[var].attrs.get("units", "No units specified"))
+
+ds_combined.to_netcdf('wus_ecoregion_data.nc')
