@@ -518,7 +518,92 @@ cbar = fig.colorbar(
 #plt.suptitle("BA ratio during heatwaves vs. non-heatwave days")
 plt.show()
 
-# Fig. 3G
+# Fig. 3G - temporal evolution of BA ratios
+
+import xarray as xr
+import geopandas as gpd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import linregress
+from tqdm import tqdm
+
+# Load datasets
+wus = xr.open_dataset('wus_ecoregion_data.nc')
+wus_ecoregions = gpd.read_file("wus_ecoregions.shp")
+
+# First, convert to an equal-area projection (US National Atlas Equal Area)
+wus_ecoregions2 = wus_ecoregions.to_crs(epsg=5070)  
+
+# Get unique ecoregion identifiers
+ecoregion_ids = wus.ecoregion.values
+years = np.arange(2001, 2025)
+
+# Initialize NumPy array to store results (30 ecoregions x 15 lags)
+burned_area_ratios = np.zeros((len(ecoregion_ids), 20)) # switched to 15 days, and 5 days prior
+
+# Process each ecoregion
+for ecoregion_idx, ecoregion in tqdm(enumerate(ecoregion_ids), total=len(ecoregion_ids)):
+    ecoregion_burned_area = wus.burned_area.sel(ecoregion=ecoregion)
+    ecoregion_tmax_percentile = wus.tmax_percentile.sel(ecoregion=ecoregion)
+    
+    ecoregion_area = wus_ecoregions2[wus_ecoregions2['US_L3CODE'] == ecoregion].geometry.area/1e6 # convert m2 to km2
+    ecoregion_area = ecoregion_area.iloc[0]
+
+    # Collect all 15-day periods for averaging
+    all_15_day_periods = []
+
+    # Loop through years
+    for year in years:
+        # Select data for the current year
+        year_burned_area = ecoregion_burned_area.sel(day=ecoregion_burned_area.day.dt.year == year)
+        year_tmax_percentile = ecoregion_tmax_percentile.sel(day=ecoregion_tmax_percentile.day.dt.year == year)
+
+        # Identify heatwave days (3+ consecutive days with tmax_percentile > 90)
+        rolling_sum = (year_tmax_percentile > 90).rolling(day=3, center=False).sum()
+        heatwave_days = rolling_sum >= 3
+
+        # Expand heatwave mask to include all days within the heatwave period
+        expanded_heatwave_mask = heatwave_days.copy()
+        for i in range(1, 3):  # Include up to 2 days before heatwave starts
+            expanded_heatwave_mask |= heatwave_days.shift(day=-i, fill_value=False)
+
+        # Identify the first day of each heatwave
+        # changed this to only consider heatwave starts if none of the prior 3 days were HWD
+        heatwave_starts = expanded_heatwave_mask & ~expanded_heatwave_mask.shift(day=1, fill_value=False) & ~expanded_heatwave_mask.shift(day=2, fill_value=False) & ~expanded_heatwave_mask.shift(day=3, fill_value=False)
+        
+        # Loop through heatwave start dates
+        for start_day in year_burned_area.day[heatwave_starts]:
+            start_idx = np.where(year_burned_area.day == start_day)[0][0]
+
+            # Check if there are enough days to extract a full 15-day period
+            if start_idx < 5 or start_idx + 14 >= len(year_burned_area):
+                continue  # Skip if not enough days before/after
+
+            # Extract 15-day period (7 days before start, lag 0, 7 days after start)
+            # change to 3 days before start, and 10 days after start
+            period_burned_area = year_burned_area[start_idx - 5 : start_idx + 15].values
+            all_15_day_periods.append(period_burned_area)
+        
+    all_15_day_periods = np.array(all_15_day_periods)
+    #all_15_day_periods = all_15_day_periods/ecoregion_area
+    
+    # Compute the mean burned area for each lag across all collected periods
+    mean_burned_area = np.nanmean(np.array(all_15_day_periods), axis=0)
+    
+    # Compute ratios relative to the first day of the heatwave (lag 0)
+    # switched to comparing against days -3 to -1
+    # and later, switched np.mean(mean_burned_area[4:7]) to np.mean(mean_burned_area[:3]) 
+    burned_area_ratios[ecoregion_idx, :] = mean_burned_area / np.mean(mean_burned_area[:5]) 
+
+#burned_area_ratios[:,7] = np.nan # set day 0 to np.nan, since they are all the same value
+
+forest_boolean_vector = np.array([1,1,1,1,1,1,0,1,1,0,1,0,0,0,1,1,1,0,1,0,1,0,1,1,1,1,1,0,0,1])
+
+# break out burned area ratios by forest/non-forest
+forest_ba_ratios = burned_area_ratios[forest_boolean_vector==1,:]
+nonforest_ba_ratios = burned_area_ratios[forest_boolean_vector==0,:]
+forest_ba_mean = np.mean(forest_ba_ratios,axis=0)
+nonforest_ba_mean = np.mean(nonforest_ba_ratios,axis=0)
 
 # new version with broken y-axis
 
@@ -583,4 +668,5 @@ for ax in (ax1, ax2):
 # Axis labels
 ax2.set_xlabel("Days relative to HW", fontsize=20)
 #ax2.set_ylabel("Ratio", fontsize=20)
+
 
