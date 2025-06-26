@@ -135,7 +135,7 @@ burned_non_hw_all = burned_non_hw_all * 100
 burned_non_hw_forest = burned_non_hw_forest * 100
 burned_non_hw_nonforest = burned_non_hw_nonforest * 100
 
-# **Compute aggregate percentages**
+# note - this function was changed so that it no longer computes percentages, just the aggregate BA
 def compute_percentages(burned_on, burned_after, total_burned, burned_non):
     percent_on = burned_on
     percent_after = burned_after
