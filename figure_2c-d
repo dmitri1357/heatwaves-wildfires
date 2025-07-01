@@ -40,7 +40,7 @@ df = pd.DataFrame({
 })
 
 # Define independent variables (with intercept)
-X = df[["heatwave_days"]] # removed ERC
+X = df[["heatwave_days"]] 
 X = sm.add_constant(X)  # Adds the intercept term
 
 # Dependent variable
@@ -54,7 +54,6 @@ print(model.summary())
 
 base_hw_days = hwall_detrended
 
-# SCENARIO 1: Constant HW days, real ERC
 X_fixed_hw = pd.DataFrame({
     "const": 1,
     "heatwave_days": base_hw_days,})
@@ -131,7 +130,7 @@ df = pd.DataFrame({
 })
 
 # Define independent variables (with intercept)
-X = df[["heatwave_days"]] # removed ERC
+X = df[["heatwave_days"]] 
 X = sm.add_constant(X)  # Adds the intercept term
 
 # Dependent variable
@@ -145,7 +144,6 @@ print(model.summary())
 
 base_hw_days = hwall_detrended
 
-# SCENARIO 1: Constant HW days, real ERC
 X_fixed_hw = pd.DataFrame({
     "const": 1,
     "heatwave_days": base_hw_days,})
